@@ -16,7 +16,24 @@ set -uo pipefail
 #   hypr-sticky-hdr status    Print current state
 # =============================================================================
 
-# --- Configuration -----------------------------------------------------------
+# --- App Defaults (universal, do not edit) ------------------------------------
+
+CONFIG_FILE="${XDG_CONFIG_HOME:-$HOME/.config}/hypr-sticky-hdr/config"
+
+declare -A APP_DEFAULTS=(
+    [hdr_cm]="hdr"
+    [hdr_brightness]="1.0"
+    [hdr_bitdepth]="10"
+    [sdr_cm]="auto"
+    [sdr_brightness]="1.0"
+    [cooldown]="2"
+    [debounce]="0.2"
+    [hdr_env_vars]="PROTON_ENABLE_HDR=1,HYPR_STICKY_HDR=1"
+    [enabled]="1"
+)
+
+declare -A GLOBAL_CONFIG=()
+# Per-monitor configs stored as MON_CFG_<normalized_name> associative arrays
 
 MONITOR_NAME=""
 
@@ -52,6 +69,100 @@ declare -A PID_CACHE=()
 
 log() {
     echo "[hypr-sticky-hdr] $(date '+%H:%M:%S') $*" >&2
+}
+
+normalize_monitor_name() {
+    local name="$1"
+    echo "$name" | tr '[:lower:]-' '[:upper:]_'
+}
+
+parse_config_file() {
+    [[ -f "$CONFIG_FILE" ]] || return 0
+    local current_section=""
+    local line_num=0
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        line_num=$((line_num + 1))
+        # Strip leading/trailing whitespace
+        line="${line#"${line%%[![:space:]]*}"}"
+        line="${line%"${line##*[![:space:]]}"}"
+        # Skip empty lines and comments
+        [[ -z "$line" || "$line" == \#* ]] && continue
+        # Section header
+        if [[ "$line" =~ ^\[([^]]+)\]$ ]]; then
+            current_section="${BASH_REMATCH[1]}"
+            local norm
+            norm=$(normalize_monitor_name "$current_section")
+            declare -gA "MON_CFG_${norm}"
+            continue
+        fi
+        # Key=value
+        if [[ "$line" =~ ^([^=]+)=(.*)$ ]]; then
+            local key="${BASH_REMATCH[1]}"
+            local val="${BASH_REMATCH[2]}"
+            # Trim whitespace around key and value
+            key="${key#"${key%%[![:space:]]*}"}"
+            key="${key%"${key##*[![:space:]]}"}"
+            val="${val#"${val%%[![:space:]]*}"}"
+            val="${val%"${val##*[![:space:]]}"}"
+            if [[ -z "$current_section" ]]; then
+                GLOBAL_CONFIG["$key"]="$val"
+            else
+                local norm
+                norm=$(normalize_monitor_name "$current_section")
+                local -n arr="MON_CFG_${norm}"
+                arr["$key"]="$val"
+            fi
+        else
+            log "Warning: config line $line_num: unrecognized format: $line"
+        fi
+    done < "$CONFIG_FILE"
+    log "Config loaded from $CONFIG_FILE"
+}
+
+resolve_config() {
+    local monitor="$1"
+    local key="$2"
+
+    # Layer 1: Per-monitor env var
+    if [[ -n "$monitor" ]]; then
+        local norm
+        norm=$(normalize_monitor_name "$monitor")
+        local env_key="HYPR_STICKY_HDR_${norm}_${key^^}"
+        if [[ -n "${!env_key+x}" ]]; then
+            echo "${!env_key}"
+            return
+        fi
+    fi
+
+    # Layer 2: Per-monitor config file
+    if [[ -n "$monitor" ]]; then
+        local norm
+        norm=$(normalize_monitor_name "$monitor")
+        local arr_name="MON_CFG_${norm}"
+        if declare -p "$arr_name" &>/dev/null; then
+            local -n arr="$arr_name"
+            if [[ -n "${arr[$key]+x}" ]]; then
+                echo "${arr[$key]}"
+                return
+            fi
+        fi
+    fi
+
+    # Layer 3: Global env var
+    local env_key="HYPR_STICKY_HDR_${key^^}"
+    if [[ -n "${!env_key+x}" ]]; then
+        echo "${!env_key}"
+        return
+    fi
+
+    # Layer 4: Global config file
+    if [[ -n "${GLOBAL_CONFIG[$key]+x}" ]]; then
+        echo "${GLOBAL_CONFIG[$key]}"
+        return
+    fi
+
+    # Layer 5: App default
+    echo "${APP_DEFAULTS[$key]:-}"
 }
 
 is_hdr_pid() {
