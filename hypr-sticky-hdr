@@ -161,7 +161,10 @@ is_hdr_pid() {
     if [[ -r "/proc/$pid/environ" ]]; then
         local env
         env=$(tr '\0' '\n' < "/proc/$pid/environ" 2>/dev/null) || { PID_CACHE[$pid]="no"; return 1; }
-        for var in "${HDR_ENV_VARS[@]}"; do
+        local hdr_vars_str
+        hdr_vars_str=$(resolve_config "" "hdr_env_vars")
+        IFS=',' read -ra hdr_vars <<< "$hdr_vars_str"
+        for var in "${hdr_vars[@]}"; do
             if echo "$env" | grep -qx "$var"; then
                 PID_CACHE[$pid]="hdr"
                 return 0
@@ -187,32 +190,44 @@ scan_windows() {
     local clients
     clients=$(hyprctl clients -j 2>/dev/null) || return
 
-    local count=0 game_names=""
-    while IFS=$'\t' read -r addr class pid; do
+    # Count HDR windows per monitor
+    declare -A new_counts=()
+    declare -A new_lists=()
+    for m in "${ALL_MONITORS[@]}"; do
+        new_counts["$m"]=0
+        new_lists["$m"]=""
+    done
+
+    while IFS=$'\t' read -r addr class pid mon; do
+        [[ -n "$mon" ]] || continue
+        [[ "${MON_ENABLED[$mon]:-0}" == "1" ]] || continue
         if is_hdr_pid "$pid"; then
-            count=$((count + 1))
-            game_names+="  ${class} (${addr})"$'\n'
+            new_counts["$mon"]=$(( ${new_counts[$mon]:-0} + 1 ))
+            new_lists["$mon"]+="  ${class} (${addr})"$'\n'
         fi
-    done < <(echo "$clients" | jq -r '.[] | "\(.address)\t\(.class)\t\(.pid)"')
+    done < <(echo "$clients" | jq -r '.[] | "\(.address)\t\(.class)\t\(.pid)\t\(.monitor)"')
 
-    local prev_demand
-    prev_demand=$(hdr_demand)
-    GAME_COUNT=$count
-    LAST_GAME_LIST="$game_names"
-    local new_demand
-    new_demand=$(hdr_demand)
+    # Process demand changes per monitor
+    for m in "${ALL_MONITORS[@]}"; do
+        [[ "${MON_ENABLED[$m]}" == "1" ]] || continue
+        local prev_demand new_demand
+        prev_demand=$(hdr_demand "$m")
+        MON_GAME_COUNT["$m"]=${new_counts[$m]:-0}
+        MON_LAST_GAME_LIST["$m"]="${new_lists[$m]:-}"
+        new_demand=$(hdr_demand "$m")
 
-    if [[ "$new_demand" -gt 0 && "$prev_demand" -eq 0 ]]; then
-        log "HDR demand started (detected=$count)"
-        cancel_cooldown
-        switch_hdr
-    elif [[ "$new_demand" -eq 0 && "$prev_demand" -gt 0 ]]; then
-        log "HDR demand ended"
-        prune_pid_cache
-        start_cooldown
-    elif [[ "$new_demand" -gt 0 ]]; then
-        cancel_cooldown
-    fi
+        if [[ "$new_demand" -gt 0 && "$prev_demand" -eq 0 ]]; then
+            log "[$m] HDR demand started (detected=${MON_GAME_COUNT[$m]})"
+            cancel_cooldown "$m"
+            switch_hdr "$m"
+        elif [[ "$new_demand" -eq 0 && "$prev_demand" -gt 0 ]]; then
+            log "[$m] HDR demand ended"
+            prune_pid_cache
+            start_cooldown "$m"
+        elif [[ "$new_demand" -gt 0 ]]; then
+            cancel_cooldown "$m"
+        fi
+    done
 }
 
 read_all_monitors() {
@@ -363,7 +378,9 @@ cancel_debounce() {
 
 schedule_scan() {
     cancel_debounce
-    ( sleep "$DEBOUNCE"; echo "CMD:__scan__:" > "$CMD_FIFO" 2>/dev/null || true ) &
+    local db_secs
+    db_secs=$(resolve_config "" "debounce")
+    ( sleep "$db_secs"; echo "CMD:__scan__:" > "$CMD_FIFO" 2>/dev/null || true ) &
     DEBOUNCE_PID=$!
 }
 
