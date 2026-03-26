@@ -23,32 +23,29 @@ When a window opens, the daemon checks if its process has `PROTON_ENABLE_HDR=1` 
 
 ## Installation
 
-Copy the script somewhere on your `$PATH`:
+One-liner (downloads the script and adds Hyprland autostart):
 
 ```bash
-install -m 755 hypr-sticky-hdr ~/.local/bin/
+curl -fsSL https://raw.githubusercontent.com/tyvsmith/hypr-sticky-hdr/main/install.sh | bash
 ```
 
-Or with chezmoi, add it as a managed file.
+Or clone and run:
+
+```bash
+git clone https://github.com/tyvsmith/hypr-sticky-hdr.git
+cd hypr-sticky-hdr
+./install.sh
+```
+
+This installs `hypr-sticky-hdr` to `~/.local/bin/` and adds `exec-once = hypr-sticky-hdr daemon` to `~/.config/hypr/autostart.conf`.
 
 ## Usage
 
 ```bash
-# Start the daemon (add to your Hyprland autostart)
-hypr-sticky-hdr daemon
-
-# Manual control
+hypr-sticky-hdr daemon    # Start the daemon
 hypr-sticky-hdr on        # Force HDR on
 hypr-sticky-hdr off       # Release manual override
 hypr-sticky-hdr status    # Show current state
-```
-
-### Hyprland autostart
-
-Add to `~/.config/hypr/autostart.conf`:
-
-```
-exec-once = hypr-sticky-hdr daemon
 ```
 
 ## Configuration
