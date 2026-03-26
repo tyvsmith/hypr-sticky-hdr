@@ -179,7 +179,8 @@ prune_pid_cache() {
 }
 
 hdr_demand() {
-    echo $((GAME_COUNT + MANUAL_ON))
+    local monitor="$1"
+    echo $(( ${MON_GAME_COUNT[$monitor]:-0} + ${MON_MANUAL_ON[$monitor]:-0} ))
 }
 
 scan_windows() {
@@ -270,48 +271,86 @@ read_all_monitors() {
 }
 
 build_monitor_string() {
-    if [[ "$1" == "hdr" ]]; then
-        echo "${MONITOR_BASE},cm,${HDR_CM},sdrbrightness,${HDR_SDR_BRIGHTNESS}"
+    local monitor="$1"
+    local mode="$2"
+
+    # Check escape hatch first
+    local escape
+    escape=$(resolve_config "$monitor" "hdr_monitor_conf")
+    if [[ -n "$escape" && "$mode" == "hdr" ]]; then
+        echo "$escape"
+        return
+    fi
+
+    if [[ "$mode" == "hdr" ]]; then
+        local baseline="${MON_SDR_BASELINE[$monitor]}"
+        local cm sdrb bitdepth
+        cm=$(resolve_config "$monitor" "hdr_cm")
+        sdrb=$(resolve_config "$monitor" "hdr_brightness")
+        bitdepth=$(resolve_config "$monitor" "hdr_bitdepth")
+        # Replace cm, sdrbrightness, and bitdepth in baseline
+        local result="$baseline"
+        result=$(echo "$result" | sed -E "s/,cm,[^,]+/,cm,${cm}/")
+        result=$(echo "$result" | sed -E "s/,sdrbrightness,[^,]+/,sdrbrightness,${sdrb}/")
+        result=$(echo "$result" | sed -E "s/,bitdepth,[^,]+/,bitdepth,${bitdepth}/")
+        echo "$result"
     else
-        echo "${MONITOR_BASE},cm,${SDR_CM},sdrbrightness,${SDR_SDR_BRIGHTNESS}"
+        echo "${MON_SDR_BASELINE[$monitor]}"
     fi
 }
 
 switch_hdr() {
-    [[ "$CURRENT_MODE" == "hdr" ]] && return
+    local monitor="$1"
+    [[ "${MON_CURRENT_MODE[$monitor]}" == "hdr" ]] && return
     local mon_str
-    mon_str=$(build_monitor_string "hdr")
-    log "Switching to HDR"
+    mon_str=$(build_monitor_string "$monitor" "hdr")
+    log "[$monitor] Switching to HDR"
     hyprctl keyword render:cm_auto_hdr 0 >/dev/null
     hyprctl keyword monitor "$mon_str" >/dev/null
-    notify-send -t 3000 "Sticky HDR" "HDR enabled" 2>/dev/null || true
-    CURRENT_MODE="hdr"
+    notify-send -t 3000 "Sticky HDR" "[$monitor] HDR enabled" 2>/dev/null || true
+    MON_CURRENT_MODE["$monitor"]="hdr"
 }
 
 switch_sdr() {
-    [[ "$CURRENT_MODE" == "sdr" ]] && return
+    local monitor="$1"
+    [[ "${MON_CURRENT_MODE[$monitor]}" == "sdr" ]] && return
     local mon_str
-    mon_str=$(build_monitor_string "sdr")
-    log "Switching to SDR"
+    mon_str=$(build_monitor_string "$monitor" "sdr")
+    log "[$monitor] Switching to SDR"
     hyprctl keyword monitor "$mon_str" >/dev/null
-    hyprctl keyword render:cm_auto_hdr 2 >/dev/null
-    notify-send -t 3000 "Sticky HDR" "HDR disabled" 2>/dev/null || true
-    CURRENT_MODE="sdr"
+    # Only re-enable auto_hdr if no other monitors are in HDR
+    local any_hdr=0
+    for m in "${ALL_MONITORS[@]}"; do
+        if [[ "$m" != "$monitor" && "${MON_CURRENT_MODE[$m]}" == "hdr" ]]; then
+            any_hdr=1
+            break
+        fi
+    done
+    if [[ "$any_hdr" -eq 0 ]]; then
+        hyprctl keyword render:cm_auto_hdr 2 >/dev/null
+    fi
+    notify-send -t 3000 "Sticky HDR" "[$monitor] HDR disabled" 2>/dev/null || true
+    MON_CURRENT_MODE["$monitor"]="sdr"
 }
 
 cancel_cooldown() {
-    if [[ -n "$COOLDOWN_PID" ]] && kill -0 "$COOLDOWN_PID" 2>/dev/null; then
-        kill "$COOLDOWN_PID" 2>/dev/null || true
-        wait "$COOLDOWN_PID" 2>/dev/null || true
-        COOLDOWN_PID=""
+    local monitor="$1"
+    local pid="${MON_COOLDOWN_PID[$monitor]:-}"
+    if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
+        kill "$pid" 2>/dev/null || true
+        wait "$pid" 2>/dev/null || true
+        MON_COOLDOWN_PID["$monitor"]=""
     fi
 }
 
 start_cooldown() {
-    cancel_cooldown
-    ( sleep "$COOLDOWN"; echo "CMD:__cooldown__:" > "$CMD_FIFO" 2>/dev/null || true ) &
-    COOLDOWN_PID=$!
-    log "Cooldown started (${COOLDOWN}s)"
+    local monitor="$1"
+    cancel_cooldown "$monitor"
+    local cd_secs
+    cd_secs=$(resolve_config "$monitor" "cooldown")
+    ( sleep "$cd_secs"; echo "CMD:__cooldown__:${monitor}" > "$CMD_FIFO" 2>/dev/null || true ) &
+    MON_COOLDOWN_PID["$monitor"]=$!
+    log "[$monitor] Cooldown started (${cd_secs}s)"
 }
 
 cancel_debounce() {
