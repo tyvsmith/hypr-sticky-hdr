@@ -35,35 +35,22 @@ declare -A APP_DEFAULTS=(
 declare -A GLOBAL_CONFIG=()
 # Per-monitor configs stored as MON_CFG_<normalized_name> associative arrays
 
-MONITOR_NAME=""
+# --- State -------------------------------------------------------------------
 
-HDR_CM="hdr"
-HDR_SDR_BRIGHTNESS=1.35
-
-SDR_CM="auto"
-SDR_SDR_BRIGHTNESS=1.0
-
-# Env vars that trigger HDR when found in a window's process
-HDR_ENV_VARS=("PROTON_ENABLE_HDR=1" "HYPR_STICKY_HDR=1")
-
-COOLDOWN=2
-DEBOUNCE=0.2
+declare -A MON_GAME_COUNT=()
+declare -A MON_MANUAL_ON=()
+declare -A MON_CURRENT_MODE=()
+declare -A MON_COOLDOWN_PID=()
+declare -A MON_ENABLED=()
+declare -A MON_SDR_BASELINE=()
+declare -A MON_LAST_GAME_LIST=()
+DEBOUNCE_PID=""
+declare -A PID_CACHE=()
+ALL_MONITORS=()
 
 CMD_FIFO="/tmp/hypr-sticky-hdr-${UID}.fifo"
 REPLY_DIR="/tmp/hypr-sticky-hdr-${UID}-replies"
 HYPR_SOCKET="/run/user/${UID}/hypr/${HYPRLAND_INSTANCE_SIGNATURE}/.socket2.sock"
-
-MONITOR_BASE=""
-
-# --- State -------------------------------------------------------------------
-
-GAME_COUNT=0
-MANUAL_ON=0
-CURRENT_MODE="sdr"
-COOLDOWN_PID=""
-DEBOUNCE_PID=""
-LAST_GAME_LIST=""
-declare -A PID_CACHE=()
 
 # --- Helpers -----------------------------------------------------------------
 
@@ -227,27 +214,59 @@ scan_windows() {
     fi
 }
 
-read_monitor() {
+read_all_monitors() {
     local json
     json=$(hyprctl monitors -j 2>/dev/null) || { log "Failed to read monitors"; return 1; }
-    if [[ -z "$MONITOR_NAME" ]]; then
-        MONITOR_NAME=$(echo "$json" | jq -r '.[0].name')
-    fi
-    local fields
-    fields=$(echo "$json" | jq -r --arg name "$MONITOR_NAME" '
-        .[] | select(.name == $name) |
-        "\(.name)\t\(.width)\t\(.height)\t\(.refreshRate)\t\(.scale)\t\(.transform)\t\(if .vrr then "1" else "0" end)\t\(.colorManagementPreset)\t\(.sdrBrightness)\t\(.sdrSaturation)\t\(.currentFormat)"
-    ') || return 1
-    local name width height rate scale transform vrr cm sdrb sdrs fmt
-    IFS=$'\t' read -r name width height rate scale transform vrr cm sdrb sdrs fmt <<< "$fields"
-    local bitdepth=8
-    if [[ "$fmt" == *"2101010"* || "$fmt" == *"1010102"* ]]; then bitdepth=10; fi
-    MONITOR_BASE="${name},${width}x${height}@${rate},auto,${scale}"
-    MONITOR_BASE+=",bitdepth,${bitdepth},vrr,${vrr}"
-    if [[ "$transform" != "0" ]]; then MONITOR_BASE+=",transform,${transform}"; fi
-    MONITOR_BASE+=",sdrsaturation,${sdrs}"
-    if [[ "$cm" == "hdr" ]]; then CURRENT_MODE="hdr"; else CURRENT_MODE="sdr"; fi
-    log "Monitor: $name ${width}x${height}@${rate} bitdepth=${bitdepth} cm=${cm} sdrB=${sdrb} (mode=${CURRENT_MODE})"
+    local count
+    count=$(echo "$json" | jq 'length')
+    ALL_MONITORS=()
+
+    local i=0
+    while [[ $i -lt $count ]]; do
+        local fields
+        fields=$(echo "$json" | jq -r --argjson idx "$i" '
+            .[$idx] |
+            "\(.name)\t\(.width)\t\(.height)\t\(.refreshRate)\t\(.scale)\t\(.transform)\t\(if .vrr then "1" else "0" end)\t\(.colorManagementPreset)\t\(.sdrBrightness)\t\(.sdrSaturation)\t\(.currentFormat)"
+        ') || { i=$((i + 1)); continue; }
+        local name width height rate scale transform vrr cm sdrb sdrs fmt
+        IFS=$'\t' read -r name width height rate scale transform vrr cm sdrb sdrs fmt <<< "$fields"
+
+        ALL_MONITORS+=("$name")
+
+        # Build baseline string
+        local bitdepth=8
+        if [[ "$fmt" == *"2101010"* || "$fmt" == *"1010102"* ]]; then bitdepth=10; fi
+        local baseline="${name},${width}x${height}@${rate},auto,${scale}"
+        baseline+=",bitdepth,${bitdepth},vrr,${vrr}"
+        if [[ "$transform" != "0" ]]; then baseline+=",transform,${transform}"; fi
+        baseline+=",sdrsaturation,${sdrs}"
+        baseline+=",cm,${cm},sdrbrightness,${sdrb}"
+        MON_SDR_BASELINE["$name"]="$baseline"
+
+        # Detect current mode
+        if [[ "$cm" == "hdr" ]]; then
+            MON_CURRENT_MODE["$name"]="hdr"
+            log "Warning: $name already in HDR mode at startup"
+        else
+            MON_CURRENT_MODE["$name"]="sdr"
+        fi
+
+        # Initialize per-monitor state
+        MON_GAME_COUNT["$name"]=0
+        MON_MANUAL_ON["$name"]=0
+        MON_COOLDOWN_PID["$name"]=""
+        MON_LAST_GAME_LIST["$name"]=""
+
+        # Resolve enabled flag
+        local enabled
+        enabled=$(resolve_config "$name" "enabled")
+        MON_ENABLED["$name"]="${enabled:-1}"
+
+        log "Monitor: $name ${width}x${height}@${rate} bitdepth=${bitdepth} cm=${cm} sdrB=${sdrb} enabled=${MON_ENABLED[$name]}"
+        i=$((i + 1))
+    done
+
+    [[ ${#ALL_MONITORS[@]} -gt 0 ]] || { log "No monitors detected"; return 1; }
 }
 
 build_monitor_string() {
@@ -396,7 +415,7 @@ run_daemon() {
     }
     trap cleanup EXIT INT TERM
 
-    read_monitor || { log "Failed to read monitor config"; exit 1; }
+    read_all_monitors || { log "Failed to read monitor config"; exit 1; }
     log "Daemon starting (display=$CURRENT_MODE)"
 
     (
