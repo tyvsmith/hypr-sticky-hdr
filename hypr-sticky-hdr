@@ -46,6 +46,7 @@ declare -A MON_COOLDOWN_PID=()
 declare -A MON_ENABLED=()
 declare -A MON_SDR_BASELINE=()
 declare -A MON_LAST_GAME_LIST=()
+declare -A MON_ID_TO_NAME=()
 DEBOUNCE_PID=""
 declare -A PID_CACHE=()
 ALL_MONITORS=()
@@ -202,6 +203,8 @@ scan_windows() {
 
     while IFS=$'\t' read -r addr class pid mon; do
         [[ -n "$mon" ]] || continue
+        # Remap numeric monitor ID to monitor name
+        mon="${MON_ID_TO_NAME[$mon]:-$mon}"
         [[ "${MON_ENABLED[$mon]:-0}" == "1" ]] || continue
         if is_hdr_pid "$pid"; then
             new_counts["$mon"]=$(( ${new_counts[$mon]:-0} + 1 ))
@@ -244,11 +247,12 @@ read_all_monitors() {
         local fields
         fields=$(echo "$json" | jq -r --argjson idx "$i" '
             .[$idx] |
-            "\(.name)\t\(.width)\t\(.height)\t\(.refreshRate)\t\(.scale)\t\(.transform)\t\(if .vrr then "1" else "0" end)\t\(.colorManagementPreset)\t\(.sdrBrightness)\t\(.sdrSaturation)\t\(.currentFormat)"
+            "\(.name)\t\(.id)\t\(.width)\t\(.height)\t\(.refreshRate)\t\(.scale)\t\(.transform)\t\(if .vrr then "1" else "0" end)\t\(.colorManagementPreset)\t\(.sdrBrightness)\t\(.sdrSaturation)\t\(.currentFormat)"
         ') || { i=$((i + 1)); continue; }
-        local name width height rate scale transform vrr cm sdrb sdrs fmt
-        IFS=$'\t' read -r name width height rate scale transform vrr cm sdrb sdrs fmt <<< "$fields"
+        local name id width height rate scale transform vrr cm sdrb sdrs fmt
+        IFS=$'\t' read -r name id width height rate scale transform vrr cm sdrb sdrs fmt <<< "$fields"
 
+        MON_ID_TO_NAME["$id"]="$name"
         ALL_MONITORS+=("$name")
 
         # Build baseline string
@@ -459,6 +463,11 @@ handle_command() {
             output="HDR manual off (${monitors[*]})"
             ;;
         reload)
+            for m in "${ALL_MONITORS[@]}"; do
+                local norm
+                norm=$(normalize_monitor_name "$m")
+                unset "MON_CFG_${norm}" 2>/dev/null || true
+            done
             GLOBAL_CONFIG=()
             parse_config_file
             # Re-capture baselines for monitors currently in SDR
@@ -511,6 +520,7 @@ handle_command() {
             ;;
         __cooldown__)
             local mon="$extra"
+            [[ -n "$mon" ]] || return
             MON_COOLDOWN_PID["$mon"]=""
             if [[ "$(hdr_demand "$mon")" -eq 0 ]]; then
                 log "[$mon] Cooldown expired, switching to SDR"
