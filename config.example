@@ -1,0 +1,43 @@
+# hypr-sticky-hdr configuration
+# Place this file at: ~/.config/hypr-sticky-hdr/config
+#
+# All settings are optional. The daemon works out-of-box with no config.
+# Environment variables override config file values (see README.md).
+
+# --- Global Settings ---------------------------------------------------------
+
+# Seconds to wait before switching back to SDR after last HDR window closes
+# cooldown=2
+
+# Seconds to debounce rapid window open/close events
+# debounce=0.2
+
+# Comma-separated list of env vars that trigger HDR detection
+# hdr_env_vars=PROTON_ENABLE_HDR=1,HYPR_STICKY_HDR=1
+
+# Default HDR mode settings (applied to all monitors unless overridden)
+# hdr_brightness=1.0
+# hdr_cm=hdr
+# hdr_bitdepth=10
+
+# Default SDR mode settings
+# sdr_brightness=1.0
+# sdr_cm=auto
+
+# --- Per-Monitor Overrides ---------------------------------------------------
+# Use [monitor-name] sections to override settings for specific monitors.
+# Monitor names match hyprctl monitors output (e.g., DP-1, HDMI-A-1).
+
+# [DP-1]
+# hdr_brightness=1.35
+# enabled=1
+
+# [HDMI-A-1]
+# enabled=0
+
+# --- Escape Hatch ------------------------------------------------------------
+# For advanced users: provide a raw Hyprland monitor config string.
+# When set, this is used verbatim instead of the constructed string.
+#
+# [DP-1]
+# hdr_monitor_conf=DP-1,2560x1440@165,auto,1,bitdepth,10,vrr,1,cm,hdr,sdrbrightness,1.35

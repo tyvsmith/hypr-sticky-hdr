@@ -25,6 +25,18 @@ main() {
     chmod +x "$INSTALL_DIR/$SCRIPT_NAME"
     echo "Installed $SCRIPT_NAME to $INSTALL_DIR/"
 
+    # Install example config if no config exists
+    local config_dir="${XDG_CONFIG_HOME:-$HOME/.config}/hypr-sticky-hdr"
+    if [[ ! -f "$config_dir/config" ]]; then
+        mkdir -p "$config_dir"
+        if [[ -f "$script_dir/config.example" ]]; then
+            cp "$script_dir/config.example" "$config_dir/config.example"
+        else
+            curl -fsSL "https://raw.githubusercontent.com/$REPO/main/config.example" \
+                -o "$config_dir/config.example" 2>/dev/null || true
+        fi
+    fi
+
     # Add to Hyprland autostart if not already present
     if [[ -d "$HOME/.config/hypr" ]]; then
         touch "$AUTOSTART_FILE"
@@ -49,6 +61,8 @@ main() {
 
     echo ""
     echo "Done. Start with: hypr-sticky-hdr daemon"
+    echo "Optional config:  $config_dir/config"
+    echo "Example config:   $config_dir/config.example"
 }
 
 main
