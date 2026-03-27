@@ -328,7 +328,7 @@ switch_hdr() {
     [[ "${MON_CURRENT_MODE[$monitor]}" == "hdr" ]] && return
     local mon_str
     mon_str=$(build_monitor_string "$monitor" "hdr")
-    log "[$monitor] Switching to HDR"
+    log "[$monitor] Switching to HDR: $mon_str"
     hyprctl keyword render:cm_auto_hdr 0 >/dev/null
     hyprctl keyword monitor "$mon_str" >/dev/null
     notify-send -t 3000 "Sticky HDR" "[$monitor] HDR enabled" 2>/dev/null || true
@@ -556,18 +556,29 @@ run_daemon() {
     mkfifo "$CMD_FIFO"
     mkdir -p "$REPLY_DIR"
 
+    local shutting_down=0
+    local child_pids=()
     cleanup() {
+        [[ "$shutting_down" -eq 0 ]] || return
+        shutting_down=1
+        trap '' INT TERM EXIT
         log "Shutting down"
+        exec 3<&- 2>/dev/null || true
         rm -f "$CMD_FIFO"
         rm -rf "$REPLY_DIR"
-        for m in "${ALL_MONITORS[@]}"; do
-            cancel_cooldown "$m"
+        for pid in "${child_pids[@]}"; do
+            pkill -P "$pid" 2>/dev/null || true
+            kill "$pid" 2>/dev/null || true
         done
-        cancel_debounce
-        jobs -p | xargs -r kill 2>/dev/null || true
+        sleep 0.3
+        for pid in "${child_pids[@]}"; do
+            pkill -9 -P "$pid" 2>/dev/null || true
+            kill -9 "$pid" 2>/dev/null || true
+        done
         wait 2>/dev/null || true
     }
-    trap cleanup EXIT INT TERM
+    trap 'cleanup; exit 0' INT TERM
+    trap 'cleanup' EXIT
 
     parse_config_file
     read_all_monitors || { log "Failed to read monitor config"; exit 1; }
@@ -583,12 +594,19 @@ run_daemon() {
         log "Event listener disconnected"
         echo "CMD:__shutdown__:" > "$CMD_FIFO" 2>/dev/null || true
     ) &
+    child_pids+=($!)
 
     ( while true; do sleep 30; echo "CMD:__scan__:" > "$CMD_FIFO" 2>/dev/null || break; done ) &
+    child_pids+=($!)
 
     exec 3<>"$CMD_FIFO"
 
-    while IFS= read -r line <&3; do
+    while true; do
+        if ! IFS= read -r -t 1 line <&3; then
+            # Timeout (no data) — loop to let bash process signals
+            [[ "$shutting_down" -eq 0 ]] || break
+            continue
+        fi
         case "$line" in
             CMD:*:*)
                 local payload="${line#CMD:}"
