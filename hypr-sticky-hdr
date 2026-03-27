@@ -48,6 +48,7 @@ declare -A MON_ID_TO_NAME=()
 DEBOUNCE_PID=""
 declare -A PID_CACHE=()
 ALL_MONITORS=()
+CONFIG_MTIME=""
 
 CMD_FIFO="/tmp/hypr-sticky-hdr-${UID}.fifo"
 REPLY_DIR="/tmp/hypr-sticky-hdr-${UID}-replies"
@@ -109,7 +110,15 @@ parse_config_file() {
             log "Warning: config line $line_num: unrecognized format: $line"
         fi
     done < "$CONFIG_FILE"
+    CONFIG_MTIME=$(stat -c %Y "$CONFIG_FILE" 2>/dev/null || echo "")
     log "Config loaded from $CONFIG_FILE"
+}
+
+check_config_changed() {
+    [[ -f "$CONFIG_FILE" ]] || return 1
+    local mtime
+    mtime=$(stat -c %Y "$CONFIG_FILE" 2>/dev/null) || return 1
+    [[ "$mtime" != "$CONFIG_MTIME" ]]
 }
 
 resolve_config() {
@@ -193,6 +202,12 @@ hdr_demand() {
 }
 
 scan_windows() {
+    # Auto-reload config if file changed
+    if check_config_changed; then
+        log "Config file changed, reloading"
+        handle_command "reload" ""
+    fi
+
     local clients
     clients=$(hyprctl clients -j 2>/dev/null) || return
 
@@ -596,8 +611,6 @@ run_daemon() {
     ) &
     child_pids+=($!)
 
-    ( while true; do sleep 30; echo "CMD:__scan__:" > "$CMD_FIFO" 2>/dev/null || break; done ) &
-    child_pids+=($!)
 
     exec 3<>"$CMD_FIFO"
 
