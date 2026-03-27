@@ -20,10 +20,6 @@
 # hdr_cm=hdr
 # hdr_bitdepth=10
 
-# Default SDR mode settings
-# sdr_brightness=1.0
-# sdr_cm=auto
-
 # --- Per-Monitor Overrides ---------------------------------------------------
 # Use [monitor-name] sections to override settings for specific monitors.
 # Monitor names match hyprctl monitors output (e.g., DP-1, HDMI-A-1).

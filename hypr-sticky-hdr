@@ -26,8 +26,6 @@ declare -A APP_DEFAULTS=(
     [hdr_cm]="hdr"
     [hdr_brightness]="1.0"
     [hdr_bitdepth]="10"
-    [sdr_cm]="auto"
-    [sdr_brightness]="1.0"
     [cooldown]="2"
     [debounce]="0.2"
     [hdr_env_vars]="PROTON_ENABLE_HDR=1,HYPR_STICKY_HDR=1"
@@ -101,6 +99,11 @@ parse_config_file() {
                 norm=$(normalize_monitor_name "$current_section")
                 local -n arr="MON_CFG_${norm}"
                 arr["$key"]="$val"
+            fi
+            # Validate key
+            local valid_keys="hdr_cm hdr_brightness hdr_bitdepth cooldown debounce hdr_env_vars enabled hdr_monitor_conf"
+            if [[ ! " $valid_keys " == *" $key "* ]]; then
+                log "Warning: config line $line_num: unknown key '$key'"
             fi
         else
             log "Warning: config line $line_num: unrecognized format: $line"

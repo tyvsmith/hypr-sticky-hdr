@@ -76,8 +76,6 @@ enabled=0
 | `hdr_brightness` | global, per-monitor | `1.0` | SDR content brightness when in HDR mode |
 | `hdr_cm` | global, per-monitor | `hdr` | Color management preset for HDR mode |
 | `hdr_bitdepth` | global, per-monitor | `10` | Bit depth in HDR mode |
-| `sdr_brightness` | global, per-monitor | `1.0` | Brightness in SDR mode |
-| `sdr_cm` | global, per-monitor | `auto` | Color management preset for SDR mode |
 | `cooldown` | global | `2` | Seconds before switching back to SDR |
 | `debounce` | global | `0.2` | Seconds to debounce window events |
 | `hdr_env_vars` | global | `PROTON_ENABLE_HDR=1,HYPR_STICKY_HDR=1` | Env vars that trigger HDR detection |
@@ -93,7 +91,7 @@ Environment variables take priority over the config file. Use the prefix `HYPR_S
 export HYPR_STICKY_HDR_COOLDOWN=5
 
 # Per-monitor override (monitor name: uppercase, hyphens become underscores)
-export HYPR_STICKY_HDR_DP_1_BRIGHTNESS=1.35
+export HYPR_STICKY_HDR_DP_1_HDR_BRIGHTNESS=1.35
 export HYPR_STICKY_HDR_HDMI_A_1_ENABLED=0
 ```
 
