@@ -1,10 +1,10 @@
 # hypr-sticky-hdr
 
-Sticky HDR daemon for [Hyprland](https://hyprland.org/). Auto-detects HDR windows by scanning process environment variables and keeps the monitor in HDR mode for the process's entire lifetime — no flickering on alt-tab.
+Sticky HDR daemon for [Hyprland](https://hyprland.org/). Auto-detects HDR windows by scanning process environment variables and keeps the monitor in HDR mode for the process's entire lifetime — no flickering on alt-tab. Supports multi-monitor setups.
 
 ## How it works
 
-When a window opens, the daemon checks if its process has `PROTON_ENABLE_HDR=1` or `HYPR_STICKY_HDR=1` in its environment. If so, HDR is enabled on the monitor and stays on until all HDR windows close (plus a short cooldown to avoid flicker).
+When a window opens, the daemon checks if its process has `PROTON_ENABLE_HDR=1` or `HYPR_STICKY_HDR=1` in its environment. If so, HDR is enabled on that window's monitor and stays on until all HDR windows on that monitor close (plus a short cooldown to avoid flicker).
 
 **Key behaviors:**
 - Listens to Hyprland IPC events for window open/close
@@ -12,7 +12,8 @@ When a window opens, the daemon checks if its process has `PROTON_ENABLE_HDR=1` 
 - Cooldown (2s) before switching back to SDR after the last HDR window closes
 - Periodic background scan (30s) as a safety net
 - PID-based caching so `/proc` reads happen only once per process
-- Manual override via `on`/`off` commands
+- Per-monitor HDR tracking — only the monitor with HDR windows switches
+- Auto-detects SDR baseline at startup — restores exact original settings
 
 ## Dependencies
 
@@ -42,26 +43,67 @@ This installs `hypr-sticky-hdr` to `~/.local/bin/` and adds `exec-once = hypr-st
 ## Usage
 
 ```bash
-hypr-sticky-hdr daemon    # Start the daemon
-hypr-sticky-hdr on        # Force HDR on
-hypr-sticky-hdr off       # Release manual override
-hypr-sticky-hdr status    # Show current state
+hypr-sticky-hdr daemon           # Start the daemon
+hypr-sticky-hdr on [monitor]     # Force HDR on (all monitors or specific)
+hypr-sticky-hdr off [monitor]    # Release manual override
+hypr-sticky-hdr status [monitor] # Show current state
+hypr-sticky-hdr reload           # Reload config file
 ```
 
 ## Configuration
 
-Edit the variables at the top of the script:
+The daemon works out-of-box with zero configuration. All monitors are auto-detected and managed with sane defaults.
 
-| Variable | Default | Description |
-|---|---|---|
-| `MONITOR_NAME` | `""` (auto-detect first monitor) | Target monitor name |
-| `HDR_CM` | `hdr` | Color management preset for HDR mode |
-| `HDR_SDR_BRIGHTNESS` | `1.35` | SDR content brightness when in HDR mode |
-| `SDR_CM` | `auto` | Color management preset for SDR mode |
-| `SDR_SDR_BRIGHTNESS` | `1.0` | SDR brightness in SDR mode |
-| `HDR_ENV_VARS` | `PROTON_ENABLE_HDR=1`, `HYPR_STICKY_HDR=1` | Env vars that trigger HDR |
-| `COOLDOWN` | `2` | Seconds to wait before switching back to SDR |
-| `DEBOUNCE` | `0.2` | Seconds to debounce window events |
+To customize, create `~/.config/hypr-sticky-hdr/config` (an example is installed at `config.example` in the same directory):
+
+```ini
+# Global settings
+cooldown=3
+hdr_brightness=1.2
+
+# Per-monitor overrides
+[DP-1]
+hdr_brightness=1.35
+
+[HDMI-A-1]
+enabled=0
+```
+
+### Available options
+
+| Key | Scope | Default | Description |
+|-----|-------|---------|-------------|
+| `hdr_brightness` | global, per-monitor | `1.0` | SDR content brightness when in HDR mode |
+| `hdr_cm` | global, per-monitor | `hdr` | Color management preset for HDR mode |
+| `hdr_bitdepth` | global, per-monitor | `10` | Bit depth in HDR mode |
+| `sdr_brightness` | global, per-monitor | `1.0` | Brightness in SDR mode |
+| `sdr_cm` | global, per-monitor | `auto` | Color management preset for SDR mode |
+| `cooldown` | global | `2` | Seconds before switching back to SDR |
+| `debounce` | global | `0.2` | Seconds to debounce window events |
+| `hdr_env_vars` | global | `PROTON_ENABLE_HDR=1,HYPR_STICKY_HDR=1` | Env vars that trigger HDR detection |
+| `enabled` | per-monitor | `1` | Whether to manage this monitor (`0` to disable) |
+| `hdr_monitor_conf` | per-monitor | — | Raw Hyprland monitor string (escape hatch) |
+
+### Environment variable overrides
+
+Environment variables take priority over the config file. Use the prefix `HYPR_STICKY_HDR_` followed by the key name in uppercase:
+
+```bash
+# Global override
+export HYPR_STICKY_HDR_COOLDOWN=5
+
+# Per-monitor override (monitor name: uppercase, hyphens become underscores)
+export HYPR_STICKY_HDR_DP_1_BRIGHTNESS=1.35
+export HYPR_STICKY_HDR_HDMI_A_1_ENABLED=0
+```
+
+### Priority order (highest to lowest)
+
+1. Per-monitor environment variable
+2. Per-monitor config file section
+3. Global environment variable
+4. Global config file value
+5. App default
 
 ## Triggering HDR for non-Proton apps
 
