@@ -561,10 +561,11 @@ handle_command() {
 
 run_daemon() {
     if [[ -p "$CMD_FIFO" ]]; then
-        if echo "CMD:status:" > "$CMD_FIFO" 2>/dev/null; then
+        if timeout 2 bash -c "echo 'CMD:status:' > '$CMD_FIFO'" 2>/dev/null; then
             log "Daemon already running. Remove $CMD_FIFO to force."
             exit 1
         fi
+        log "Removing stale FIFO from previous run"
     fi
 
     rm -f "$CMD_FIFO"
@@ -592,7 +593,7 @@ run_daemon() {
         done
         wait 2>/dev/null || true
     }
-    trap 'cleanup; exit 0' INT TERM
+    trap 'cleanup; exit 0' INT TERM HUP QUIT PIPE
     trap 'cleanup' EXIT
 
     parse_config_file
