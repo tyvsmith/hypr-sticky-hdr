@@ -52,7 +52,31 @@ CONFIG_MTIME=""
 
 CMD_FIFO="/tmp/hypr-sticky-hdr-${UID}.fifo"
 REPLY_DIR="/tmp/hypr-sticky-hdr-${UID}-replies"
-HYPR_SOCKET="/run/user/${UID}/hypr/${HYPRLAND_INSTANCE_SIGNATURE}/.socket2.sock"
+
+# Auto-detect active Hyprland socket: pick the socket dir with a live socket,
+# preferring the newest if multiple exist. Falls back to HYPRLAND_INSTANCE_SIGNATURE.
+_detect_hypr_socket() {
+    local hypr_dir="/run/user/${UID}/hypr"
+    local best="" best_mtime=0
+    for d in "$hypr_dir"/*/; do
+        [[ -S "${d}.socket2.sock" ]] || continue
+        local mtime
+        mtime=$(stat -c %Y "${d}.socket2.sock" 2>/dev/null) || continue
+        if [[ "$mtime" -gt "$best_mtime" ]]; then
+            best="${d}.socket2.sock"
+            best_mtime="$mtime"
+        fi
+    done
+    if [[ -n "$best" ]]; then
+        echo "$best"
+    elif [[ -n "$HYPRLAND_INSTANCE_SIGNATURE" ]]; then
+        echo "$hypr_dir/${HYPRLAND_INSTANCE_SIGNATURE}/.socket2.sock"
+    else
+        return 1
+    fi
+}
+
+HYPR_SOCKET=""
 
 # --- Helpers -----------------------------------------------------------------
 
@@ -560,6 +584,10 @@ handle_command() {
 # --- Daemon ------------------------------------------------------------------
 
 run_daemon() {
+    HYPR_SOCKET="$(_detect_hypr_socket)" || { echo "Cannot find Hyprland socket" >&2; exit 1; }
+    HYPRLAND_INSTANCE_SIGNATURE="$(basename "$(dirname "$HYPR_SOCKET")")"
+    export HYPRLAND_INSTANCE_SIGNATURE
+
     if [[ -p "$CMD_FIFO" ]]; then
         if timeout 2 bash -c "echo 'CMD:status:' > '$CMD_FIFO'" 2>/dev/null; then
             log "Daemon already running. Remove $CMD_FIFO to force."
