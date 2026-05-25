@@ -4,7 +4,7 @@ Sticky HDR daemon for [Hyprland](https://hyprland.org/). Auto-detects HDR window
 
 ## How it works
 
-When a window opens, the daemon checks if its process has `PROTON_ENABLE_HDR=1` or `HYPR_STICKY_HDR=1` in its environment. If so, HDR is enabled on that window's monitor and stays on until all HDR windows on that monitor close (plus a short cooldown to avoid flicker).
+When a window opens, the daemon checks if its process has `PROTON_ENABLE_HDR=1`, `DXVK_HDR=1`, `ENABLE_HDR_WSI=1`, or `HYPR_STICKY_HDR=1` in its environment. If so, HDR is enabled on that window's monitor and stays on until all HDR windows on that monitor close (plus a short cooldown to avoid flicker).
 
 **Key behaviors:**
 - Listens to Hyprland IPC events for window open/close
@@ -78,7 +78,7 @@ enabled=0
 | `hdr_bitdepth` | global, per-monitor | `10` | Bit depth in HDR mode |
 | `cooldown` | global | `2` | Seconds before switching back to SDR |
 | `debounce` | global | `0.2` | Seconds to debounce window events |
-| `hdr_env_vars` | global | `PROTON_ENABLE_HDR=1,HYPR_STICKY_HDR=1` | Env vars that trigger HDR detection |
+| `hdr_env_vars` | global | `PROTON_ENABLE_HDR=1,DXVK_HDR=1,ENABLE_HDR_WSI=1,HYPR_STICKY_HDR=1` | Env vars that trigger HDR detection |
 | `enabled` | per-monitor | `1` | Whether to manage this monitor (`0` to disable) |
 | `hdr_monitor_conf` | per-monitor | — | Raw Hyprland monitor string (escape hatch) |
 
