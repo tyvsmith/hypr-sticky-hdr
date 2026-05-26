@@ -584,17 +584,19 @@ handle_command() {
 # --- Daemon ------------------------------------------------------------------
 
 run_daemon() {
+    # Single-instance lock held for the daemon's lifetime on FD 9. flock(2) is
+    # race-free vs. the previous FIFO probe, which let parallel autostart
+    # invocations all pass the check and clobber each other's FIFO.
+    LOCK_FILE="/tmp/hypr-sticky-hdr-${UID}.lock"
+    exec 9>"$LOCK_FILE"
+    if ! flock -n 9; then
+        echo "hypr-sticky-hdr: another daemon instance is already running" >&2
+        exit 1
+    fi
+
     HYPR_SOCKET="$(_detect_hypr_socket)" || { echo "Cannot find Hyprland socket" >&2; exit 1; }
     HYPRLAND_INSTANCE_SIGNATURE="$(basename "$(dirname "$HYPR_SOCKET")")"
     export HYPRLAND_INSTANCE_SIGNATURE
-
-    if [[ -p "$CMD_FIFO" ]]; then
-        if timeout 2 bash -c "echo 'CMD:status:' > '$CMD_FIFO'" 2>/dev/null; then
-            log "Daemon already running. Remove $CMD_FIFO to force."
-            exit 1
-        fi
-        log "Removing stale FIFO from previous run"
-    fi
 
     rm -f "$CMD_FIFO"
     mkfifo "$CMD_FIFO"
