@@ -19,9 +19,15 @@ A window switches its monitor to the `hdr` spec when either:
 - its window class is listed (default: `gamescope`).
 
 When the last such window closes, the module waits `cooldown_sec` (default 2s)
-and reverts to the `sdr` spec. A monitor that disconnects and returns gets HDR
-re-asserted if an HDR window is still alive, since Hyprland re-applies its own
-rules on reconnect.
+and reverts to the `sdr` spec. The cooldown runs from the last close: a window
+that opens and shuts during a pending cooldown restarts it at full length
+rather than inheriting the nearly expired deadline.
+
+A monitor that disconnects and returns gets its full current state re-applied
+(Hyprland re-applies its own rules on reconnect, wiping fields like `bitdepth`
+and `vrr` in both the HDR and SDR case), while other outputs' hotplugs are
+ignored instead of modesetting this one. A repeating reconcile check
+(`reconcile_sec`, default 30s) backstops any window event Hyprland drops.
 
 ## Installing
 
@@ -92,6 +98,8 @@ opens. That is why the module takes a spec instead of inferring one.
 | `classes` | `{ "gamescope" }` | Window classes that always count as HDR |
 | `cooldown_sec` | `2` | Seconds to linger in HDR after the last HDR window closes |
 | `prewarm_sec` | `10` | Seconds a `prewarm()` hold lasts (see gamescope below) |
+| `reconcile_sec` | `30` | Seconds between safety-net re-checks for missed events (`0` disables) |
+| `environ_reader` | `/proc` reader | `function(pid) -> string\|nil` overriding how a process's environ is read (tests, exotic setups) |
 
 The overlays can change any field, not just color: a lower refresh rate in HDR,
 different brightness, anything `hl.monitor` accepts. Overlays and lists
@@ -104,11 +112,10 @@ Upgrading from the bash daemon: the defaults no longer match
 `ENABLE_HDR_WSI=1`. If your runner still uses either, pass the full list via
 `env`.
 
-`setup()` returns a handle with `wants_hdr()` (true during a prewarm hold,
-even with no window), `in_hdr()`, and `prewarm()`. Multi-monitor: call
-`setup()` once per output, each with its own named spec. Demand detection is
-global for now, so a qualifying window on any output switches every managed
-monitor.
+`setup()` returns a handle with `wants_hdr()` (real window demand; prewarm
+holds excluded), `in_hdr()`, and `prewarm()`. Multi-monitor: call `setup()`
+once per output, each with its own named spec. Demand is scoped to the
+instance's output, so a game on one monitor leaves the others in SDR.
 
 ## Prewarming for gamescope
 
@@ -118,7 +125,10 @@ though gamescope's own window would flip the monitor to HDR a moment later.
 
 `M.prewarm()` enters HDR ahead of any window and holds it for `prewarm_sec`
 (default 10s). A qualifying window arriving inside the hold takes over normal
-stickiness; otherwise the hold expires and the usual cooldown revert runs. It
+stickiness; otherwise the hold expires and the usual cooldown revert runs. The
+hold's deadline is persisted to `$XDG_RUNTIME_DIR`, so a config reload that
+recreates Hyprland's Lua VM mid-launch (Omarchy reloads on every file save)
+resumes the hold instead of dropping to SDR right before gamescope's probe. It
 is callable from outside the compositor:
 
 ```bash
@@ -179,6 +189,17 @@ header): monitor rules are whole-record replacements; `window.close` skips
 SIGKILLed processes and `window.destroy` carries no address, so teardown
 recounts live windows; `HL.Monitor.cm` reports the configured preset, not
 live state.
+
+## Tests
+
+Behavior tests run the module against a mock `hl` — window and monitor events,
+timers, cooldown and prewarm timing, per-output scoping — with plain Lua:
+
+```bash
+tests/run.sh
+```
+
+Needs bash and a `lua`/`lua5.4` interpreter, nothing else.
 
 ## Still on hyprlang?
 
