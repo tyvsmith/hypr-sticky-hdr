@@ -1,115 +1,191 @@
 # hypr-sticky-hdr
 
-Sticky HDR daemon for [Hyprland](https://hyprland.org/). Auto-detects HDR windows by scanning process environment variables and keeps the monitor in HDR mode for the process's entire lifetime — no flickering on alt-tab. Supports multi-monitor setups.
+Sticky HDR for [Hyprland](https://hyprland.org/)'s Lua config. Keeps a monitor
+in HDR for as long as an HDR window lives, not just while it is fullscreen.
+Hyprland's own `render:cm_auto_hdr` drops to SDR on every alt-tab; this module
+holds HDR until the last HDR window is gone, plus a short cooldown.
+
+One file, no daemon, no dependencies. Hyprland calls the module's Lua callbacks
+directly, so the external process the old implementation needed (socat, jq, IPC
+socket) is gone. Requires the Lua config introduced in Hyprland 0.55; written
+and tested against 0.56.
 
 ## How it works
 
-When a window opens, the daemon checks if its process has `PROTON_ENABLE_HDR=1`, `DXVK_HDR=1`, `ENABLE_HDR_WSI=1`, or `HYPR_STICKY_HDR=1` in its environment. If so, HDR is enabled on that window's monitor and stays on until all HDR windows on that monitor close (plus a short cooldown to avoid flicker).
+A window switches its monitor to the `hdr` spec when either:
 
-**Key behaviors:**
-- Listens to Hyprland IPC events for window open/close
-- Debounced scanning (200ms) to batch rapid events
-- Cooldown (2s) before switching back to SDR after the last HDR window closes
-- Periodic background scan (30s) as a safety net
-- PID-based caching so `/proc` reads happen only once per process
-- Per-monitor HDR tracking — only the monitor with HDR windows switches
-- Auto-detects SDR baseline at startup — restores exact original settings
+- its process carries a marker env var (default: `DXVK_HDR=1` or
+  `HYPR_STICKY_HDR=1`), read once per PID from `/proc/<pid>/environ`, or
+- its window class is listed (default: `gamescope`).
 
-## Dependencies
+When the last such window closes, the module waits `cooldown_sec` (default 2s)
+and reverts to the `sdr` spec. A monitor that disconnects and returns gets HDR
+re-asserted if an HDR window is still alive, since Hyprland re-applies its own
+rules on reconnect.
 
-- `hyprctl` (comes with Hyprland)
-- `socat` — for Hyprland IPC socket
-- `jq` — JSON parsing
-- `notify-send` — optional desktop notifications
+## Installing
 
-## Installation
-
-One-liner (downloads the script and adds Hyprland autostart):
+Drop the module into your Hyprland config directory:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/tyvsmith/hypr-sticky-hdr/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/tyvsmith/hypr-sticky-hdr/main/sticky_hdr.lua \
+  -o ~/.config/hypr/sticky_hdr.lua
 ```
 
-Or clone and run:
+On [Omarchy](https://omarchy.org/), `~/.config` is already on `package.path`,
+so `require("hypr.sticky_hdr")` resolves as-is. On a plain Lua config, add the
+path yourself before requiring:
+
+```lua
+package.path = os.getenv("HOME") .. "/.config/?.lua;" .. package.path
+```
+
+The require name is load-bearing: `hyprctl eval` prewarming (below) requires
+the module by name, and a different name loads a second, empty instance that
+prewarms nothing. Require it as `hypr.sticky_hdr` everywhere.
+
+## Wiring it into monitors.lua
+
+Replace your `hl.monitor(...)` call with `setup()`, passing the full spec:
+
+```lua
+-- ~/.config/hypr/monitors.lua
+require("hypr.sticky_hdr").setup({
+  monitor = {
+    output        = "",          -- "" = wildcard; name it ("DP-3") on multi-monitor
+    mode          = "preferred",
+    position      = "auto",
+    scale         = 1,
+    bitdepth      = 10,
+    vrr           = 2,
+    sdrbrightness = 1.35,        -- only acts in HDR mode
+    sdrsaturation = 1.0,
+  },
+})
+```
+
+`setup()` applies `monitor` merged with the `sdr` overlay (default
+`{ cm = "srgb" }`) at startup, and swaps to `monitor` merged with the `hdr`
+overlay (default `{ cm = "hdr" }`) while HDR demand exists. Windows already
+open are adopted at startup, so a config reload mid-game does not flash SDR.
+
+### Why the full spec
+
+Hyprland monitor rules are whole-record replacements: any field left out
+reverts to its default when the rule applies. The module therefore merges
+`sdr`/`hdr` over your complete `monitor` spec instead of emitting a bare `cm`
+change. State every field you care about.
+
+The spec cannot be read back at runtime either. `HL.Monitor` exposes
+`vrr_active`, whether VRR is engaged right now, not the configured mode, so
+with `vrr = 2` (fullscreen-only) it reads false exactly when a game's window
+opens. That is why the module takes a spec instead of inferring one.
+
+### Options
+
+| Key | Default | Description |
+|---|---|---|
+| `monitor` | required | Full `hl.monitor` spec, the base for both states |
+| `sdr` | `{ cm = "srgb" }` | Overlay merged over `monitor` for the SDR state |
+| `hdr` | `{ cm = "hdr" }` | Overlay merged over `monitor` for the HDR state |
+| `env` | `{ "DXVK_HDR=1", "HYPR_STICKY_HDR=1" }` | Whole `NAME=value` environ entries that mark a process as HDR |
+| `classes` | `{ "gamescope" }` | Window classes that always count as HDR |
+| `cooldown_sec` | `2` | Seconds to linger in HDR after the last HDR window closes |
+| `prewarm_sec` | `10` | Seconds a `prewarm()` hold lasts (see gamescope below) |
+
+The overlays can change any field, not just color: a lower refresh rate in HDR,
+different brightness, anything `hl.monitor` accepts. Overlays and lists
+**replace** their defaults rather than merging: a custom `hdr` must restate
+`cm = "hdr"`, and a custom `classes` must restate `"gamescope"` if you still
+want it.
+
+Upgrading from the bash daemon: the defaults no longer match
+`PROTON_ENABLE_HDR=1` (retired from current Proton builds) or
+`ENABLE_HDR_WSI=1`. If your runner still uses either, pass the full list via
+`env`.
+
+`setup()` returns a handle with `wants_hdr()` (true during a prewarm hold,
+even with no window), `in_hdr()`, and `prewarm()`. Multi-monitor: call
+`setup()` once per output, each with its own named spec. Demand detection is
+global for now, so a qualifying window on any output switches every managed
+monitor.
+
+## Prewarming for gamescope
+
+gamescope probes the output's color state once at startup. If the monitor is
+still in SDR at that instant, `--hdr-enabled` finds nothing to attach to, even
+though gamescope's own window would flip the monitor to HDR a moment later.
+
+`M.prewarm()` enters HDR ahead of any window and holds it for `prewarm_sec`
+(default 10s). A qualifying window arriving inside the hold takes over normal
+stickiness; otherwise the hold expires and the usual cooldown revert runs. It
+is callable from outside the compositor:
 
 ```bash
-git clone https://github.com/tyvsmith/hypr-sticky-hdr.git
-cd hypr-sticky-hdr
-./install.sh
+hyprctl eval "require('hypr.sticky_hdr').prewarm()"
 ```
 
-This installs `hypr-sticky-hdr` to `~/.local/bin/` and adds `exec-once = hypr-sticky-hdr daemon` to `~/.config/hypr/autostart.conf`.
+### With ScopeBuddy
 
-## Usage
+How to deliver the prewarm from
+[ScopeBuddy](https://github.com/HikariKnight/ScopeBuddy) depends on the launch
+path, because scb only evals `SCB_PRE_COMMAND` on the gamescope path (verified
+scopebuddy 1.5.0; the `SCB_NOSCOPE=1` branch never calls it). From a live
+config:
 
 ```bash
-hypr-sticky-hdr daemon           # Start the daemon
-hypr-sticky-hdr on [monitor]     # Force HDR on (all monitors or specific)
-hypr-sticky-hdr off [monitor]    # Release manual override
-hypr-sticky-hdr status [monitor] # Show current state
-hypr-sticky-hdr reload           # Reload config file
+# ~/.config/scopebuddy/scb.conf — shared piece
+hdr_prewarm="hyprctl eval \"require('hypr.sticky_hdr').prewarm()\""
 ```
 
-## Configuration
-
-The daemon works out-of-box with zero configuration. All monitors are auto-detected and managed with sane defaults.
-
-To customize, create `~/.config/hypr-sticky-hdr/config` (an example is installed at `config.example` in the same directory):
-
-```ini
-# Global settings
-cooldown=3
-hdr_brightness=1.2
-
-# Per-monitor overrides
-[DP-1]
-hdr_brightness=1.35
-
-[HDMI-A-1]
-enabled=0
-```
-
-### Available options
-
-| Key | Scope | Default | Description |
-|-----|-------|---------|-------------|
-| `hdr_brightness` | global, per-monitor | `1.0` | SDR content brightness when in HDR mode |
-| `hdr_cm` | global, per-monitor | `hdr` | Color management preset for HDR mode |
-| `hdr_bitdepth` | global, per-monitor | `10` | Bit depth in HDR mode |
-| `cooldown` | global | `2` | Seconds before switching back to SDR |
-| `debounce` | global | `0.2` | Seconds to debounce window events |
-| `hdr_env_vars` | global | `PROTON_ENABLE_HDR=1,DXVK_HDR=1,ENABLE_HDR_WSI=1,HYPR_STICKY_HDR=1` | Env vars that trigger HDR detection |
-| `enabled` | per-monitor | `1` | Whether to manage this monitor (`0` to disable) |
-| `hdr_monitor_conf` | per-monitor | — | Raw Hyprland monitor string (escape hatch) |
-
-### Environment variable overrides
-
-Environment variables take priority over the config file. Use the prefix `HYPR_STICKY_HDR_` followed by the key name in uppercase:
+Gamescope titles: `SCB_PRE_COMMAND` runs right before gamescope execs, so the
+one-shot color probe finds the monitor already in HDR. A `command=` prefix
+would run inside gamescope, after the probe. gamescope supplies the game's HDR
+itself (WSI layer), so `DXVK_HDR` stays unset and stickiness after the hold
+rides the default `gamescope` class match:
 
 ```bash
-# Global override
-export HYPR_STICKY_HDR_COOLDOWN=5
-
-# Per-monitor override (monitor name: uppercase, hyphens become underscores)
-export HYPR_STICKY_HDR_DP_1_HDR_BRIGHTNESS=1.35
-export HYPR_STICKY_HDR_HDMI_A_1_ENABLED=0
+SCB_PRE_COMMAND="$hdr_prewarm"
+SCB_GAMESCOPE_ARGS="-w 5120 -h 2160 -W 5120 -H 2160 -r 165 -f --hdr-enabled --adaptive-sync"
+unset DXVK_HDR
 ```
 
-### Priority order (highest to lowest)
+Native (no gamescope) titles: prefix the game command instead, and export
+`DXVK_HDR=1` so the game renders HDR and its window matches the default `env`
+markers once it appears:
 
-1. Per-monitor environment variable
-2. Per-monitor config file section
-3. Global environment variable
-4. Global config file value
-5. App default
+```bash
+export DXVK_HDR=1
+command="$hdr_prewarm; $command"
+```
 
-## Triggering HDR for non-Proton apps
+Native titles rarely need the prewarm (the game's own window triggers HDR on
+open), but it removes the SDR-to-HDR flash during loading screens.
 
-Set the environment variable before launching:
+## Triggering HDR for anything else
+
+Launch with the marker env var:
 
 ```bash
 HYPR_STICKY_HDR=1 some-hdr-app
 ```
+
+Or add the app's window class to `classes`.
+
+## Hyprland API notes
+
+Quirks the module works around, current as of 0.56 (details in the file
+header): monitor rules are whole-record replacements; `window.close` skips
+SIGKILLed processes and `window.destroy` carries no address, so teardown
+recounts live windows; `HL.Monitor.cm` reports the configured preset, not
+live state.
+
+## Still on hyprlang?
+
+The previous implementation, an external bash daemon doing the same detection
+over Hyprland's IPC socket, lives on the
+[`hyprlang-legacy`](https://github.com/tyvsmith/hypr-sticky-hdr/tree/hyprlang-legacy)
+branch. It is unmaintained.
 
 ## License
 
