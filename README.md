@@ -1,5 +1,12 @@
 # hypr-sticky-hdr
 
+> [!NOTE]
+> This branch is the bash daemon for Hyprland's deprecated hyprlang config. It
+> is kept for reference and no longer maintained. Hyprland 0.55 replaced
+> hyprlang with a Lua config that delivers window events directly, which
+> collapses this daemon into a single in-process module:
+> see [`main`](https://github.com/tyvsmith/hypr-sticky-hdr/tree/main).
+
 Sticky HDR daemon for [Hyprland](https://hyprland.org/). Auto-detects HDR windows by scanning process environment variables and keeps the monitor in HDR mode for the process's entire lifetime — no flickering on alt-tab. Supports multi-monitor setups.
 
 ## How it works
