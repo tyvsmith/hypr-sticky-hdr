@@ -14,7 +14,7 @@ Lua callbacks directly, so the external process the old implementation needed
 
 - Linux with `/proc` mounted so the module can inspect window processes
 - Hyprland 0.56 with its Lua configuration API
-- `hyprctl` only when calling `prewarm()` from outside the compositor
+- `hyprctl` for external `prewarm()`, reloads, and configuration-error checks
 
 Source installation needs `make` and `install`; cloning needs `git`, while the
 manual download needs `curl`.
@@ -306,8 +306,9 @@ the repository test suite does not.
 
 ### From flat Lua state overrides
 
-Current `sdr` and `hdr` overrides require `monitor` and `config` members. Move
-fields from an older flat overlay under `monitor`:
+Current `sdr` and `hdr` overrides use structured `monitor` and `config` members.
+Either may be omitted to inherit its default. Move fields from an older flat
+overlay under `monitor`:
 
 ```lua
 -- Before
