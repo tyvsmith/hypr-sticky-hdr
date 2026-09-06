@@ -63,7 +63,7 @@ copy or remove the module; they do not edit your Hyprland configuration.
 For a direct system installation:
 
 ```bash
-make install
+sudo make install
 ```
 
 The default prefix is `/usr/local`. The target derives the Lua major.minor
@@ -354,9 +354,10 @@ make check
 make install-user
 ```
 
-For a direct system installation, run `make check`, then rerun `make install`
-with the original `prefix` and no `DESTDIR`. For a manual user installation,
-repeat the atomic download above after reviewing the current migration notes.
+For a direct system installation, run `make check`, then rerun
+`sudo make install` with the original `prefix` and no `DESTDIR`. For a manual
+user installation, repeat the atomic download above after reviewing the current
+migration notes.
 
 Use the package manager to update package-owned files. Packagers use `DESTDIR`
 only to stage package contents; it is not a live installation root.
@@ -376,8 +377,8 @@ hyprctl configerrors
 3. Remove the module with the same owner that installed it:
    - package installation: use the package manager
    - `make install-user`: run `make uninstall-user`
-   - direct `make install`: run `make uninstall` with the original `prefix` and
-     no `DESTDIR`
+   - direct `sudo make install`: run `sudo make uninstall` with the original
+     `prefix` and no `DESTDIR`
    - manual download: delete the installed `sticky_hdr.lua`
 4. Remove `${XDG_RUNTIME_DIR:-/tmp}/hypr-sticky-hdr-prewarm-*` if you want to
    discard saved prewarm deadlines.
