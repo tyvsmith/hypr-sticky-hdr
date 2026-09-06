@@ -1,24 +1,30 @@
 -- sticky_hdr.lua -- keep a monitor in HDR for as long as an HDR window lives,
 -- not just while it is fullscreen (Hyprland's render:cm_auto_hdr flaps on
 -- alt-tab). A window whose process carries a marker env var, or whose class is
--- listed, switches the monitor to the `hdr` spec until the last such window is
--- gone plus `cooldown` seconds. Usage: see hypr/monitors.lua.
+-- listed, switches the monitor to the `hdr` state until the last such window
+-- is gone plus `cooldown` seconds. Each state can carry a monitor overlay and
+-- compositor-wide hl.config values. Usage: see hypr/monitors.lua.
 --
 -- M.prewarm() enters HDR ahead of any window, for launchers that probe the
 -- output's color state once at startup (gamescope). The hold lasts prewarm_sec
 -- (default 10s): a qualifying window arriving inside it takes over normal
 -- stickiness; otherwise the hold expires and the usual cooldown revert runs.
--- The hold's deadline is persisted to $XDG_RUNTIME_DIR so it survives the
+-- Each output's hold deadline is persisted to $XDG_RUNTIME_DIR so it survives
 -- config reloads that recreate this Lua VM (Omarchy reloads on every save).
 --
--- Hyprland 0.56 notes: monitor rules are whole-record replacements, so sdr/hdr
--- are merged over the full spec; window.close skips SIGKILL and window.destroy
--- has no address, so teardown recounts live windows; HL.Timer has no cancel(),
--- but set_enabled(false) calls a pending oneshot off -- callbacks still
--- re-check a generation counter in case one was already in flight; HL.Monitor
--- exposes cm as the configured preset and vrr_active as a live boolean, so
--- neither the color state nor the configured VRR mode can be read back, and
--- the module keeps its own flag.
+-- Hyprland 0.56 notes: monitor rules are whole-record replacements, so each
+-- state's monitor overlay is merged over the full spec. Structured states use
+-- { monitor = {...}, config = {...} }. Config is compositor-wide, so all
+-- setup() calls must use matching config pairs; the module keeps HDR config active
+-- until its last output finishes cooldown. SDR transitions queue the monitor
+-- rule before restoring global config; Hyprland applies queued monitor rules
+-- before cm_auto_hdr runs on the next render. window.close skips SIGKILL and
+-- window.destroy has no address, so teardown recounts live windows; HL.Timer
+-- has no cancel(), but set_enabled(false) calls a pending oneshot off --
+-- callbacks still re-check a generation counter in case one was already in
+-- flight; HL.Monitor exposes cm as the configured preset and vrr_active as a
+-- live boolean, so neither the color state nor the configured VRR mode can be
+-- read back, and the module keeps its own flag.
 --
 -- Tests (mock hl): tests/run.sh in the hypr-sticky-hdr repo.
 
@@ -26,8 +32,14 @@ local M = {}
 M._instances = {}
 
 local DEFAULTS = {
-  sdr      = { cm = "srgb" },
-  hdr      = { cm = "hdr" },
+  sdr      = {
+    monitor = { cm = "srgb" },
+    config = { render = { cm_auto_hdr = 1 } },
+  },
+  hdr      = {
+    monitor = { cm = "hdr" },
+    config = { render = { cm_auto_hdr = 0 } },
+  },
   env      = { "DXVK_HDR=1", "HYPR_STICKY_HDR=1" },
   classes  = { "gamescope" },
   cooldown_sec  = 2,
@@ -35,16 +47,55 @@ local DEFAULTS = {
   reconcile_sec = 30, -- safety net for missed events; 0 disables
 }
 
+local global_configs = nil
+local active_hdr_instances = 0
+local applied_global_state = nil
+
 local COALESCE_MS = 100 -- window events within this batch into one scan
 
-local STATE_FILE = (os.getenv("XDG_RUNTIME_DIR") or "/tmp")
+local STATE_FILE_PREFIX = (os.getenv("XDG_RUNTIME_DIR") or "/tmp")
   .. "/hypr-sticky-hdr-prewarm"
+
+local function state_file(output)
+  local key = output == "" and "all" or output:gsub(".", function(c)
+    return string.format("%02x", string.byte(c))
+  end)
+  return STATE_FILE_PREFIX .. "-" .. key
+end
 
 local function merged(base, over)
   local t = {}
   for k, v in pairs(base) do t[k] = v end
   for k, v in pairs(over or {}) do t[k] = v end
   return t
+end
+
+local function deep_equal(a, b)
+  if type(a) ~= type(b) then return false end
+  if type(a) ~= "table" then return a == b end
+  for k, v in pairs(a) do
+    if not deep_equal(v, b[k]) then return false end
+  end
+  for k in pairs(b) do
+    if a[k] == nil then return false end
+  end
+  return true
+end
+
+local function normalize_state(value, default)
+  if value == nil then return default.monitor, default.config end
+  assert(type(value) == "table", "sticky_hdr.setup: sdr/hdr must be tables")
+  for key in pairs(value) do
+    assert(key == "monitor" or key == "config",
+      "sticky_hdr.setup: unknown state member '" .. tostring(key) .. "'")
+  end
+  assert(value.monitor ~= nil or value.config ~= nil,
+    "sticky_hdr.setup: sdr/hdr must use monitor/config members")
+  local monitor = value.monitor == nil and default.monitor or value.monitor
+  local config = value.config == nil and default.config or value.config
+  assert(type(monitor) == "table" and type(config) == "table",
+    "sticky_hdr.setup: state monitor/config members must be tables")
+  return monitor, config
 end
 
 local function to_set(list)
@@ -80,24 +131,36 @@ local function environ_has_any(blob, entries)
   return false
 end
 
--- Seconds-precision deadline shared by every instance; last writer wins.
-local function write_hold_deadline(sec_from_now)
-  local f = io.open(STATE_FILE, "w")
+local function write_deadline(path, deadline)
+  local f = io.open(path, "w")
   if f then
-    f:write(tostring(os.time() + sec_from_now))
+    f:write(tostring(deadline))
     f:close()
   end
 end
 
-local function persisted_hold_ms(cap_ms)
-  local f = io.open(STATE_FILE, "r")
-  if not f then return 0 end
+local function write_hold_deadline(output, sec_from_now)
+  write_deadline(state_file(output), os.time() + sec_from_now)
+end
+
+local function read_deadline(path)
+  local f = io.open(path, "r")
+  if not f then return nil end
   local deadline = tonumber(f:read("a"))
   f:close()
+  return deadline
+end
+
+local function remaining_hold_ms(deadline, cap_ms)
   if not deadline then return 0 end
   local remaining = (deadline - os.time()) * 1000
   if remaining <= 0 then return 0 end
   return math.min(math.floor(remaining), cap_ms)
+end
+
+local function persisted_hold(output, cap_ms)
+  local deadline = read_deadline(state_file(output))
+  return remaining_hold_ms(deadline, cap_ms)
 end
 
 --- Start managing one monitor. Returns a handle with .wants_hdr() (real
@@ -106,8 +169,10 @@ function M.setup(opts)
   assert(type(opts) == "table" and type(opts.monitor) == "table",
     "sticky_hdr.setup: opts.monitor (an hl.monitor spec) is required")
 
-  local SDR     = merged(opts.monitor, opts.sdr or DEFAULTS.sdr)
-  local HDR     = merged(opts.monitor, opts.hdr or DEFAULTS.hdr)
+  local sdr_monitor, sdr_config = normalize_state(opts.sdr, DEFAULTS.sdr)
+  local hdr_monitor, hdr_config = normalize_state(opts.hdr, DEFAULTS.hdr)
+  local SDR     = merged(opts.monitor, sdr_monitor)
+  local HDR     = merged(opts.monitor, hdr_monitor)
   local ENV     = opts.env or DEFAULTS.env
   local CLASSES = to_set(opts.classes or DEFAULTS.classes)
   local READ    = opts.environ_reader or read_environ
@@ -119,6 +184,14 @@ function M.setup(opts)
   -- it sees every window.
   local OUTPUT = opts.monitor.output or ""
   local FILTER = OUTPUT ~= "" and { monitor = OUTPUT } or nil
+  local candidate_configs = { sdr = sdr_config, hdr = hdr_config }
+  local first_setup = global_configs == nil
+  if not first_setup then
+    assert(deep_equal(global_configs.sdr, sdr_config)
+        and deep_equal(global_configs.hdr, hdr_config),
+      "sticky_hdr.setup: all instances must use matching sdr/hdr config tables")
+  end
+  local CONFIGS = global_configs or candidate_configs
 
   local env_wants     = {} -- pid -> bool, so /proc is read once per process
   local in_hdr        = false
@@ -128,6 +201,62 @@ function M.setup(opts)
   local cooldown_timer = nil
   local coalesce_timer = nil
   local prune_pending  = false
+  local monitor_dirty  = false
+
+  local function apply_global(state)
+    if applied_global_state == state then return end
+    hl.config(CONFIGS[state])
+    applied_global_state = state
+  end
+
+  local function apply_monitor(spec)
+    local ok, err = pcall(hl.monitor, spec)
+    if not ok then
+      monitor_dirty = true
+      error(err, 0)
+    end
+    monitor_dirty = false
+  end
+
+  -- Monitor state is per instance; config state is shared by the module. The
+  -- first HDR transition configures Hyprland before touching its monitor. The
+  -- last SDR transition queues its monitor before restoring global config.
+  local function transition(want_hdr, force_monitor)
+    if want_hdr then
+      if in_hdr then
+        if force_monitor then apply_monitor(HDR) end
+        return
+      end
+
+      local first = active_hdr_instances == 0
+      if first then apply_global("hdr") end
+      local ok, err = pcall(apply_monitor, HDR)
+      if not ok then
+        if first then
+          local rollback_ok, rollback_err = pcall(apply_global, "sdr")
+          if not rollback_ok then
+            error(tostring(err) .. "; failed to restore SDR config: "
+              .. tostring(rollback_err), 0)
+          end
+        end
+        error(err, 0)
+      end
+      active_hdr_instances = active_hdr_instances + 1
+      in_hdr = true
+      return
+    end
+
+    if not in_hdr then
+      if force_monitor then apply_monitor(SDR) end
+      if active_hdr_instances == 0 then apply_global("sdr") end
+      return
+    end
+
+    apply_monitor(SDR)
+    active_hdr_instances = active_hdr_instances - 1
+    in_hdr = false
+    if active_hdr_instances == 0 then apply_global("sdr") end
+  end
 
   local function window_wants_hdr(w)
     if CLASSES[w.class] then return true end
@@ -183,15 +312,14 @@ function M.setup(opts)
       if gen ~= cooldown_gen then return end
       cooldown_timer = nil
       if in_hdr and not demand() then
-        hl.monitor(SDR)
-        in_hdr = false
+        transition(false)
         last_want = false
       end
     end, { timeout = COOLDOWN_MS, type = "oneshot" })
   end
 
-  -- State flags follow the hl calls, never precede them: if a call throws,
-  -- the next event retries instead of finding the flag already latched.
+  -- Monitor flags follow hl.monitor; global state follows hl.config. A failed
+  -- call therefore leaves the corresponding state ready for retry.
   local function sync()
     if prune_pending then
       prune_pending = false
@@ -200,12 +328,13 @@ function M.setup(opts)
     local want = demand()
     if want then
       invalidate_cooldown()
-      if not in_hdr then
-        hl.monitor(HDR)
-        in_hdr = true
-      end
+      if not in_hdr or monitor_dirty then transition(true, monitor_dirty) end
     elseif in_hdr and (last_want or cooldown_timer == nil) then
       arm_cooldown()
+    elseif monitor_dirty then
+      transition(false, true)
+    elseif active_hdr_instances == 0 and applied_global_state ~= "sdr" then
+      apply_global("sdr")
     end
     last_want = want
   end
@@ -219,6 +348,46 @@ function M.setup(opts)
       sync()
     end, { timeout = COALESCE_MS, type = "oneshot" })
   end
+
+  local function schedule_hold(ms, gen)
+    hl.timer(function()
+      if gen ~= prewarm_gen then return end
+      prewarm_gen = 0
+      os.remove(state_file(OUTPUT)) -- a dead hold must not resurrect on reload
+      sync()
+    end, { timeout = ms, type = "oneshot" })
+  end
+
+  local function hold(ms)
+    prewarm_gen = prewarm_gen + 1
+    schedule_hold(ms, prewarm_gen)
+  end
+
+  local function prewarm()
+    write_hold_deadline(OUTPUT, PREWARM_MS / 1000)
+    hold(PREWARM_MS)
+    sync()
+  end
+
+  -- Baseline. Adopts windows that already exist, and resumes a persisted
+  -- prewarm hold, so a config reload mid-game or mid-launch does not flash
+  -- SDR right as gamescope probes the output.
+  local resume_ms = persisted_hold(OUTPUT, PREWARM_MS)
+  if resume_ms > 0 then
+    prewarm_gen = prewarm_gen + 1
+  else
+    os.remove(state_file(OUTPUT))
+  end
+  local want = demand()
+  local baseline_ok, baseline_err = pcall(transition, want, true)
+  if not baseline_ok then
+    prewarm_gen = 0
+    if first_setup then applied_global_state = nil end
+    error(baseline_err, 0)
+  end
+  if first_setup then global_configs = candidate_configs end
+  if resume_ms > 0 then schedule_hold(resume_ms, prewarm_gen) end
+  last_want = want
 
   hl.on("window.open", schedule_sync)
   hl.on("window.close", function()
@@ -238,10 +407,9 @@ function M.setup(opts)
   hl.on("monitor.added", function(mon)
     if OUTPUT ~= "" and mon and mon.name and mon.name ~= OUTPUT then return end
     invalidate_cooldown()
-    local want = demand()
-    hl.monitor(want and HDR or SDR)
-    in_hdr = want
-    last_want = want
+    local current_want = demand()
+    transition(current_want, true)
+    last_want = current_want
   end)
 
   -- Missed or early events (see the 0.56 notes above) would otherwise pin a
@@ -249,33 +417,6 @@ function M.setup(opts)
   if RECONCILE_MS > 0 then
     hl.timer(sync, { timeout = RECONCILE_MS, type = "repeat" })
   end
-
-  local function hold(ms)
-    prewarm_gen = prewarm_gen + 1
-    local gen = prewarm_gen
-    hl.timer(function()
-      if gen ~= prewarm_gen then return end
-      prewarm_gen = 0
-      os.remove(STATE_FILE) -- a dead hold must not resurrect on reload
-      sync()
-    end, { timeout = ms, type = "oneshot" })
-  end
-
-  local function prewarm()
-    write_hold_deadline(PREWARM_MS / 1000)
-    hold(PREWARM_MS)
-    sync()
-  end
-
-  -- Baseline. Adopts windows that already exist, and resumes a persisted
-  -- prewarm hold, so a config reload mid-game or mid-launch does not flash
-  -- SDR right as gamescope probes the output.
-  local resume_ms = persisted_hold_ms(PREWARM_MS)
-  if resume_ms > 0 then hold(resume_ms) end
-  local want = demand()
-  hl.monitor(want and HDR or SDR)
-  in_hdr = want
-  last_want = want
 
   local handle = {
     wants_hdr = window_demand,
