@@ -62,6 +62,8 @@ validate-lua-version:
 validate-dist-root:
 	@test "$(DIST_ROOT)" = "$(PROJECT_ROOT)/dist" || \
 		{ printf '%s\n' 'refusing unsafe DIST_ROOT' >&2; exit 2; }
+	@test ! -L "$(DIST_ROOT)" || \
+		{ printf '%s\n' 'refusing symlinked DIST_ROOT' >&2; exit 2; }
 
 validate-dist-path: validate-version validate-dist-root
 	@test "$(DIST_STAGE)" = "$(DIST_ROOT)/hypr-sticky-hdr-$(VERSION)" || \
@@ -73,12 +75,13 @@ dist: validate-dist-path
 	cp --parents $(DIST_FILES) "$(DIST_STAGE)"
 	tar --sort=name --mtime="@$(SOURCE_DATE_EPOCH)" --owner=0 --group=0 --numeric-owner \
 		--mode='u=rwX,go=rX' \
-		-C "$(DIST_ROOT)" -czf "$(DIST_ARCHIVE)" "$(DIST_NAME)"
+		-C "$(DIST_ROOT)" --use-compress-program='gzip -n' \
+		-cf "$(DIST_ARCHIVE)" "$(DIST_NAME)"
 	rm -rf -- "$(DIST_STAGE)"
 	cd "$(DIST_ROOT)" && sha256sum "$(DIST_NAME).tar.gz" > "$(DIST_NAME).tar.gz.sha256"
 
 distcheck: dist
-	@tmp=$$(mktemp -d); trap 'rm -rf "$$tmp"' EXIT; \
+	@set -eu; tmp=$$(mktemp -d); trap 'rm -rf "$$tmp"' EXIT; \
 		cd "$(DIST_ROOT)"; sha256sum -c "$(DIST_NAME).tar.gz.sha256"; cd - >/dev/null; \
 		tar -xzf "$(DIST_ARCHIVE)" -C "$$tmp"; \
 		src="$$tmp/$(DIST_NAME)"; \
