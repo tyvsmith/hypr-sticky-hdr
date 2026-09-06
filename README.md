@@ -6,9 +6,18 @@ Hyprland's own `render:cm_auto_hdr` drops to SDR on every alt-tab. This module
 disables that automation while it holds HDR, then restores it after the last
 HDR window is gone plus a short cooldown.
 
-One file, no daemon, no dependencies. Hyprland calls the module's Lua callbacks
-directly, so the external process the old implementation needed (socat, jq, IPC
-socket) is gone. Requires Hyprland 0.56.
+One file, no daemon, and no extra runtime packages. Hyprland calls the module's
+Lua callbacks directly, so the external process the old implementation needed
+(socat, jq, IPC socket) is gone.
+
+## Requirements
+
+- Linux with `/proc` mounted so the module can inspect window processes
+- Hyprland 0.56 with its Lua configuration API
+- `hyprctl` for external `prewarm()`, reloads, and configuration-error checks
+
+Source installation needs `make` and `install`; cloning needs `git`, while the
+manual download needs `curl`.
 
 ## How it works
 
@@ -37,19 +46,76 @@ ignored instead of modesetting this one. A repeating reconcile check
 
 ## Installing
 
-Drop the module into your Hyprland config directory:
+Clone the repository and install for the current user:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/tyvsmith/hypr-sticky-hdr/main/sticky_hdr.lua \
-  -o ~/.config/hypr/sticky_hdr.lua
+git clone https://github.com/tyvsmith/hypr-sticky-hdr.git
+cd hypr-sticky-hdr
+make install-user
 ```
 
+This installs `sticky_hdr.lua` under
+`${XDG_CONFIG_HOME:-$HOME/.config}/hypr/`. Re-running `make install-user`
+updates that copy. Remove it with `make uninstall-user` after unwiring the
+module as described under [Uninstalling](#uninstalling). These targets only
+copy or remove the module; they do not edit your Hyprland configuration.
+
+For a direct system installation:
+
+```bash
+sudo make install
+```
+
+The default prefix is `/usr/local`. The target derives the Lua major.minor
+version and installs under the standard
+`$(prefix)/share/lua/$(LUA_VERSION)/hypr/sticky_hdr.lua` path, where
+`require("hypr.sticky_hdr")` resolves without a `package.path` change. It also
+installs the README and license.
+
+Packagers can stage the same files with GNU-style variables:
+
+```bash
+make install DESTDIR=/tmp/hypr-sticky-hdr-package prefix=/usr
+```
+
+Set `LUA` or `LUA_VERSION` when the target runtime differs from the build host.
+`luadir` and `moduledir` are available for package-specific layouts.
+
+For a manual user install:
+
+```bash
+(
+  set -eu
+  module_dir="${XDG_CONFIG_HOME:-$HOME/.config}/hypr"
+  install -d "$module_dir"
+  tmp=$(mktemp "$module_dir/.sticky_hdr.lua.XXXXXX")
+  trap 'rm -f "$tmp"' EXIT
+  curl -fsSL https://raw.githubusercontent.com/tyvsmith/hypr-sticky-hdr/main/sticky_hdr.lua \
+    -o "$tmp"
+  test -s "$tmp"
+  chmod 0644 "$tmp"
+  mv -f "$tmp" "$module_dir/sticky_hdr.lua"
+  trap - EXIT
+)
+```
+
+### Release channels
+
+The project has not published a tagged release yet. Until it does, `main` is
+the only maintained source channel and can change. Replace `main` in the URL
+with a commit SHA when you need a reproducible install.
+
+Pushing a future `vX.Y.Z` tag runs `distcheck` and publishes the matching source
+archive and checksum. The workflow does not create the tag.
+
 On [Omarchy](https://omarchy.org/), `~/.config` is already on `package.path`,
-so `require("hypr.sticky_hdr")` resolves as-is. On a plain Lua config, add the
-path yourself before requiring:
+so a user installation resolves as-is. For a user installation with a plain
+Lua config, add the config home before requiring:
 
 ```lua
-package.path = os.getenv("HOME") .. "/.config/?.lua;" .. package.path
+local config_home = os.getenv("XDG_CONFIG_HOME")
+  or (os.getenv("HOME") .. "/.config")
+package.path = config_home .. "/?.lua;" .. package.path
 ```
 
 The require name is load-bearing: `hyprctl eval` prewarming (below) requires
@@ -127,10 +193,21 @@ include every global setting the state needs. Monitor overlays can change any
 field that `hl.monitor` accepts.
 
 State overrides must use the structured `monitor` and `config` members shown
-above.
+above. For example, this keeps the default HDR global config but replaces the
+HDR monitor overlay:
 
-List options replace their defaults: a custom `classes` list must restate
-`"gamescope"` to keep it.
+```lua
+hdr = {
+  monitor = {
+    cm = "hdr",
+    sdrbrightness = 1.2,
+  },
+}
+```
+
+List options replace their defaults. A custom `classes` list must restate
+`"gamescope"` to keep it, and a custom `env` list must restate either default
+marker you still use. Class matches and environment entries are exact.
 
 `setup()` returns a handle with `wants_hdr()` (real window demand; prewarm
 holds excluded), `in_hdr()`, and `prewarm()`. Multi-monitor: call `setup()`
@@ -145,18 +222,19 @@ gamescope probes the output's color state once at startup. If the monitor is
 still in SDR at that instant, `--hdr-enabled` finds nothing to attach to, even
 though gamescope's own window would flip the monitor to HDR a moment later.
 
-`M.prewarm()` enters HDR ahead of any window and holds it for `prewarm_sec`
-(default 10s). A qualifying window arriving inside the hold takes over normal
-stickiness; otherwise the hold expires and the usual cooldown revert runs.
-The hold deadline is persisted separately for each output in
-`$XDG_RUNTIME_DIR`, so a config reload that recreates Hyprland's Lua VM
-mid-launch (Omarchy reloads on every file save) resumes only that output's hold
-instead of dropping it to SDR right before gamescope's probe. It is callable
-from outside the compositor:
+Module-level `M.prewarm()` enters HDR on every configured output and holds each
+one for `prewarm_sec` (default 10s). The handle returned by `setup()` exposes a
+per-output `prewarm()` method for calls made inside the Lua config. The external
+command below calls the module method, so it prewarms all managed outputs:
 
 ```bash
 hyprctl eval "require('hypr.sticky_hdr').prewarm()"
 ```
+
+A qualifying window arriving inside a hold takes over normal stickiness.
+Otherwise the hold expires and the usual cooldown revert runs. Deadlines are
+persisted per output in `$XDG_RUNTIME_DIR`, so a config reload that recreates
+Hyprland's Lua VM resumes each output independently.
 
 ### With ScopeBuddy
 
@@ -205,6 +283,108 @@ HYPR_STICKY_HDR=1 some-hdr-app
 
 Or add the app's window class to `classes`.
 
+## Verifying
+
+Run the repository checks before installing or updating:
+
+```bash
+make check
+```
+
+After installation, reload Hyprland and check its Lua configuration:
+
+```bash
+hyprctl reload
+hyprctl configerrors
+```
+
+Then launch a window with `HYPR_STICKY_HDR=1` and inspect `hyprctl monitors`
+while it is open and after the cooldown. This checks the real compositor path;
+the repository test suite does not.
+
+## Migrating
+
+### From flat Lua state overrides
+
+Current `sdr` and `hdr` overrides use structured `monitor` and `config` members.
+Either may be omitted to inherit its default. Move fields from an older flat
+overlay under `monitor`:
+
+```lua
+-- Before
+hdr = { cm = "hdr", sdrbrightness = 1.2 }
+
+-- After
+hdr = {
+  monitor = { cm = "hdr", sdrbrightness = 1.2 },
+}
+```
+
+Omitting `config` inherits the state's default global config. Supplying it
+replaces that default member.
+
+### From the legacy daemon
+
+Back up `${XDG_CONFIG_HOME:-$HOME/.config}/hypr-sticky-hdr/`, then translate
+any settings you still need into `setup()` before deleting that directory.
+Remove the `exec-once = hypr-sticky-hdr daemon` autostart entry, then stop the
+running daemon or restart the Hyprland session before loading the Lua module.
+Running both implementations makes them compete for monitor state. Remove
+`~/.local/bin/hypr-sticky-hdr` after the migration. The old code remains on the
+unmaintained
+[`hyprlang-legacy`](https://github.com/tyvsmith/hypr-sticky-hdr/tree/hyprlang-legacy)
+branch for reference.
+
+The Lua defaults no longer match `PROTON_ENABLE_HDR=1` or `ENABLE_HDR_WSI=1`.
+If a runner still needs them, include them alongside any defaults you want to
+keep because `env` replaces the whole list.
+
+## Updating
+
+Fetch a cloned source tree first:
+
+```bash
+git pull --ff-only
+```
+
+Review the migration notes above and adjust your config before replacing the
+installed module. Then update a user installation:
+
+```bash
+make check
+make install-user
+```
+
+For a direct system installation, run `make check`, then rerun
+`sudo make install` with the original `prefix` and no `DESTDIR`. For a manual
+user installation, repeat the atomic download above after reviewing the current
+migration notes.
+
+Use the package manager to update package-owned files. Packagers use `DESTDIR`
+only to stage package contents; it is not a live installation root.
+
+Reload after any update:
+
+```bash
+hyprctl reload
+hyprctl configerrors
+```
+
+## Uninstalling
+
+1. Replace each `setup()` call with the original `hl.monitor(...)` call, and
+   restore the `render.cm_auto_hdr` setting you want Hyprland to own.
+2. Remove external `prewarm()` calls, including ScopeBuddy launch hooks.
+3. Remove the module with the same owner that installed it:
+   - package installation: use the package manager
+   - `make install-user`: run `make uninstall-user`
+   - direct `sudo make install`: run `sudo make uninstall` with the original
+     `prefix` and no `DESTDIR`
+   - manual download: delete the installed `sticky_hdr.lua`
+4. Remove `${XDG_RUNTIME_DIR:-/tmp}/hypr-sticky-hdr-prewarm-*` if you want to
+   discard saved prewarm deadlines.
+5. Run `hyprctl reload` and `hyprctl configerrors`.
+
 ## Hyprland API notes
 
 Quirks the module works around, current as of 0.56 (details in the file
@@ -213,16 +393,32 @@ SIGKILLed processes and `window.destroy` carries no address, so teardown
 recounts live windows; `HL.Monitor.cm` reports the configured preset, not
 live state.
 
-## Tests
+## Development and packaging
 
 Behavior tests run the module against a mock `hl` — window and monitor events,
 timers, cooldown and prewarm timing, per-output scoping — with plain Lua:
 
 ```bash
-tests/run.sh
+make check
 ```
 
-Needs bash and a `lua`/`lua5.4` interpreter, nothing else.
+The checks need Bash and a `lua5.4` or `lua` interpreter. They do not exercise a
+real Hyprland session, GPU, display, or gamescope process; use the verification
+steps above for that path.
+
+Maintainers and packagers can build and inspect an archive without creating a
+release:
+
+```bash
+make dist VERSION=X.Y.Z
+make distcheck VERSION=X.Y.Z
+```
+
+`VERSION` must be numeric stable SemVer. `dist` writes
+`dist/hypr-sticky-hdr-X.Y.Z.tar.gz` and its `.sha256` file. `distcheck` verifies
+the checksum, runs the checks from the extracted archive, and tests staged
+system installation and removal. These targets do not create a tag or GitHub
+release. Archive builds also need GNU `tar`, `cp`, and `sha256sum`.
 
 ## License
 
