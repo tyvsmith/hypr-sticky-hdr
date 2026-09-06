@@ -82,9 +82,14 @@ curl -fsSL https://raw.githubusercontent.com/tyvsmith/hypr-sticky-hdr/main/stick
   -o "${XDG_CONFIG_HOME:-$HOME/.config}/hypr/sticky_hdr.lua"
 ```
 
-`main` is the only maintained source channel and can change. Replace `main` in
-the URL with a commit SHA when you need a reproducible install. The project does
-not publish tagged releases yet.
+### Release channels
+
+The project has not published a tagged release yet. Until it does, `main` is
+the only maintained source channel and can change. Replace `main` in the URL
+with a commit SHA when you need a reproducible install.
+
+Pushing a future `vX.Y.Z` tag runs `distcheck` and publishes the matching source
+archive and checksum. The workflow does not create the tag.
 
 On [Omarchy](https://omarchy.org/), `~/.config` is already on `package.path`,
 so `require("hypr.sticky_hdr")` resolves as-is. On a plain Lua config, add the
