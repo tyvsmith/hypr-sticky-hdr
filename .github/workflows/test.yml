@@ -43,7 +43,8 @@ jobs:
     steps:
       - name: Install git
         # base-devel has no git. Without it checkout falls back to a tarball
-        # download and `make dist` would lose SOURCE_DATE_EPOCH.
+        # download and `make dist` would lose SOURCE_DATE_EPOCH. The keyring
+        # goes first in its own transaction; see packaging/aur/build.sh.
         run: |
           pacman-key --init
           pacman -Sy --noconfirm --needed archlinux-keyring

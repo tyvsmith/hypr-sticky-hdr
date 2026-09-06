@@ -23,7 +23,9 @@ sed -i '/^NoExtract/d' /etc/pacman.conf
 
 # The image ships a populated keyring but no local master key, which the
 # archlinux-keyring install hook needs to repopulate. Create one, then refresh
-# the keyring so packages signed after the pinned image was built verify.
+# the keyring in its own transaction: pacman verifies every package in a
+# transaction against the keyring present before it starts, so a single -Syu
+# fails on anything signed with a key newer than the pinned image.
 pacman-key --init
 pacman -Sy --noconfirm --needed archlinux-keyring
 pacman -Su --noconfirm --needed namcap
@@ -76,6 +78,7 @@ pacman -Qk "$PKGNAME"
 
 # Hyprland must link the Lua major.minor the module was installed under.
 hypr_lua="$(readelf -d /usr/bin/Hyprland | sed -nE 's/.*NEEDED.*\[liblua\.so\.([0-9]+\.[0-9]+)\].*/\1/p' | head -n1)"
+[[ -n "$hypr_lua" ]] || fail "could not determine the Lua version Hyprland links: no liblua.so.X.Y in NEEDED"
 [[ "$lmod" == "/usr/share/lua/$hypr_lua" ]] || fail "Hyprland links Lua $hypr_lua but the module installed under $lmod"
 
 # The module resolves from the stock package.path, with no user-local copy.
