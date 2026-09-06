@@ -2,8 +2,10 @@ PACKAGE := hypr-sticky-hdr
 
 prefix ?= /usr/local
 datarootdir ?= $(prefix)/share
-pkgdatadir ?= $(datarootdir)/$(PACKAGE)
-moduledir ?= $(pkgdatadir)/hypr
+LUA ?= $(shell command -v lua 2>/dev/null || command -v lua5.4 2>/dev/null)
+LUA_VERSION ?= $(shell $(LUA) -e 'io.write((_VERSION:gsub("^Lua%s+", "")))' 2>/dev/null)
+luadir ?= $(datarootdir)/lua/$(LUA_VERSION)
+moduledir ?= $(luadir)/hypr
 docdir ?= $(datarootdir)/doc/$(PACKAGE)
 licensedir ?= $(datarootdir)/licenses/$(PACKAGE)
 
@@ -14,15 +16,17 @@ RM ?= rm -f
 USER_CONFIG_HOME := $(or $(strip $(XDG_CONFIG_HOME)),$(HOME)/.config)
 USER_MODULE_DIR := $(USER_CONFIG_HOME)/hypr
 
-DIST_ROOT := dist
-DIST_NAME := $(PACKAGE)-$(VERSION)
-DIST_STAGE := $(DIST_ROOT)/$(DIST_NAME)
-DIST_ARCHIVE := $(DIST_ROOT)/$(DIST_NAME).tar.gz
-DIST_CHECKSUM := $(DIST_ARCHIVE).sha256
+override PROJECT_ROOT := $(realpath $(CURDIR))
+override DIST_ROOT := $(PROJECT_ROOT)/dist
+override DIST_NAME := hypr-sticky-hdr-$(VERSION)
+override DIST_STAGE := $(DIST_ROOT)/$(DIST_NAME)
+override DIST_ARCHIVE := $(DIST_ROOT)/$(DIST_NAME).tar.gz
+override DIST_CHECKSUM := $(DIST_ARCHIVE).sha256
 DIST_FILES := Makefile sticky_hdr.lua README.md LICENSE tests/hl_mock.lua tests/run.sh tests/test.lua
 SOURCE_DATE_EPOCH ?= $(shell git log -1 --format=%ct 2>/dev/null || printf 0)
 
-.PHONY: all check install-user uninstall-user install uninstall dist distcheck clean validate-version
+.PHONY: all check install-user uninstall-user install uninstall dist distcheck clean \
+	validate-lua-version validate-version validate-dist-root validate-dist-path
 
 all: check
 
@@ -36,13 +40,13 @@ install-user:
 uninstall-user:
 	$(RM) "$(USER_MODULE_DIR)/sticky_hdr.lua"
 
-install:
+install: validate-lua-version
 	$(INSTALL) -d "$(DESTDIR)$(moduledir)" "$(DESTDIR)$(docdir)" "$(DESTDIR)$(licensedir)"
 	$(INSTALL_DATA) sticky_hdr.lua "$(DESTDIR)$(moduledir)/sticky_hdr.lua"
 	$(INSTALL_DATA) README.md "$(DESTDIR)$(docdir)/README.md"
 	$(INSTALL_DATA) LICENSE "$(DESTDIR)$(licensedir)/LICENSE"
 
-uninstall:
+uninstall: validate-lua-version
 	$(RM) "$(DESTDIR)$(moduledir)/sticky_hdr.lua"
 	$(RM) "$(DESTDIR)$(docdir)/README.md"
 	$(RM) "$(DESTDIR)$(licensedir)/LICENSE"
@@ -51,7 +55,19 @@ validate-version:
 	@printf '%s\n' "$(VERSION)" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$$' || \
 		{ printf '%s\n' 'VERSION must be numeric SemVer (for example, 1.2.3)' >&2; exit 2; }
 
-dist: validate-version
+validate-lua-version:
+	@printf '%s\n' "$(LUA_VERSION)" | grep -Eq '^[0-9]+\.[0-9]+$$' || \
+		{ printf '%s\n' 'LUA_VERSION must be major.minor; set LUA or LUA_VERSION explicitly' >&2; exit 2; }
+
+validate-dist-root:
+	@test "$(DIST_ROOT)" = "$(PROJECT_ROOT)/dist" || \
+		{ printf '%s\n' 'refusing unsafe DIST_ROOT' >&2; exit 2; }
+
+validate-dist-path: validate-version validate-dist-root
+	@test "$(DIST_STAGE)" = "$(DIST_ROOT)/hypr-sticky-hdr-$(VERSION)" || \
+		{ printf '%s\n' 'refusing unsafe DIST_STAGE' >&2; exit 2; }
+
+dist: validate-dist-path
 	rm -rf -- "$(DIST_STAGE)"
 	mkdir -p "$(DIST_STAGE)/tests"
 	cp --parents $(DIST_FILES) "$(DIST_STAGE)"
@@ -66,16 +82,16 @@ distcheck: dist
 		tar -xzf "$(DIST_ARCHIVE)" -C "$$tmp"; \
 		$(MAKE) -C "$$tmp/$(DIST_NAME)" check; \
 		$(MAKE) -C "$$tmp/$(DIST_NAME)" DESTDIR="$$tmp/pkg" prefix=/usr install; \
-		cmp sticky_hdr.lua "$$tmp/pkg/usr/share/$(PACKAGE)/hypr/sticky_hdr.lua"; \
+		cmp sticky_hdr.lua "$$tmp/pkg/usr/share/lua/$(LUA_VERSION)/hypr/sticky_hdr.lua"; \
 		cmp README.md "$$tmp/pkg/usr/share/doc/$(PACKAGE)/README.md"; \
 		cmp LICENSE "$$tmp/pkg/usr/share/licenses/$(PACKAGE)/LICENSE"; \
 		test "$$(find "$$tmp/pkg" -type f -printf '%P\n' | LC_ALL=C sort)" = \
 		"$$(printf '%s\n' \
 			'usr/share/doc/$(PACKAGE)/README.md' \
 			'usr/share/licenses/$(PACKAGE)/LICENSE' \
-			'usr/share/$(PACKAGE)/hypr/sticky_hdr.lua')"; \
+			'usr/share/lua/$(LUA_VERSION)/hypr/sticky_hdr.lua')"; \
 		$(MAKE) -C "$$tmp/$(DIST_NAME)" DESTDIR="$$tmp/pkg" prefix=/usr uninstall; \
 		test -z "$$(find "$$tmp/pkg" -type f -print -quit)"
 
-clean:
+clean: validate-dist-root
 	rm -rf -- "$(DIST_ROOT)"
