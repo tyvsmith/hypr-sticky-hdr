@@ -5,6 +5,9 @@ on:
     branches: [main]
   push:
     branches: [main]
+  schedule:
+    # Weekly, so the Arch package gate catches a Lua or Hyprland change early.
+    - cron: "17 6 * * 1"
 
 permissions:
   contents: read
@@ -26,3 +29,39 @@ jobs:
 
       - name: Run tests
         run: ./tests/run.sh
+
+  package:
+    name: Arch package
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    container:
+      # Pinned by digest. The mirror is live on purpose: this gate should break
+      # when Arch would break AUR users (for example a Lua major bump).
+      # Refresh: docker buildx imagetools inspect docker.io/library/archlinux:base-devel
+      # Keep in sync with .github/workflows/aur.yml.
+      image: docker.io/library/archlinux:base-devel@sha256:84cd9ef000b3cff245ec028e87965b84724f4bf1cc63fc2741ba927b88515ed6
+    steps:
+      - name: Install git
+        # base-devel has no git. Without it checkout falls back to a tarball
+        # download and `make dist` would lose SOURCE_DATE_EPOCH. The keyring
+        # goes first in its own transaction; see packaging/aur/build.sh.
+        run: |
+          pacman-key --init
+          pacman -Sy --noconfirm --needed archlinux-keyring
+          pacman -Su --noconfirm --needed git
+
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Render the recipe against a local archive
+        run: |
+          make dist VERSION=0.0.0
+          make pkgbuild VERSION=0.0.0
+          # makepkg uses a source file already next to the PKGBUILD instead of
+          # downloading it, so the unreleased 0.0.0 URL is never fetched.
+          cp dist/hypr-sticky-hdr-0.0.0.tar.gz dist/aur/
+
+      - name: Build, lint, install, and smoke-test the package
+        run: packaging/aur/build.sh dist/aur

@@ -1,0 +1,112 @@
+name: AUR
+
+on:
+  workflow_call:
+    inputs:
+      version:
+        description: Released version, X.Y.Z without the v
+        required: true
+        type: string
+      pkgrel:
+        required: false
+        type: string
+        default: "1"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Released version, X.Y.Z without the v
+        required: true
+        type: string
+      pkgrel:
+        description: AUR pkgrel. Bump for a packaging-only republish of the same version
+        required: true
+        type: string
+        default: "1"
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    name: Publish to AUR
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    environment: aur
+    concurrency:
+      group: aur-publish
+      cancel-in-progress: false
+    env:
+      VERSION: ${{ inputs.version }}
+      PKGREL: ${{ inputs.pkgrel }}
+      PKGNAME: hypr-sticky-hdr
+      # Keep in sync with .github/workflows/test.yml.
+      ARCH_IMAGE: docker.io/library/archlinux:base-devel@sha256:84cd9ef000b3cff245ec028e87965b84724f4bf1cc63fc2741ba927b88515ed6
+    steps:
+      - name: Validate inputs
+        run: |
+          [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "version must be X.Y.Z" >&2; exit 2; }
+          [[ "$PKGREL" =~ ^[1-9][0-9]*$ ]] || { echo "pkgrel must be a positive integer" >&2; exit 2; }
+
+      # Default ref on purpose: the release tag when called from release.yml,
+      # main for a dispatch. A dispatch republishes main's template for an
+      # already released version, which is how packaging-only fixes ship.
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Download the published release archive
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          archive="$PKGNAME-$VERSION.tar.gz"
+          is_draft=$(gh release view "v$VERSION" --json isDraft --jq .isDraft)
+          [[ "$is_draft" == false ]] || { echo "release v$VERSION is a draft" >&2; exit 1; }
+          mkdir -p dist
+          gh release download "v$VERSION" --dir dist --clobber \
+            --pattern "$archive" --pattern "$archive.sha256"
+          (cd dist && sha256sum -c "$archive.sha256")
+
+      - name: Render PKGBUILD from the published checksum
+        run: make pkgbuild VERSION="$VERSION" PKGREL="$PKGREL"
+
+      - name: Refuse downgrades and silent same-version changes
+        run: |
+          git clone -q "https://aur.archlinux.org/$PKGNAME.git" aur-current
+          if [[ -f aur-current/PKGBUILD ]]; then
+            current="$(sed -n 's/^pkgver=//p' aur-current/PKGBUILD)-$(sed -n 's/^pkgrel=//p' aur-current/PKGBUILD)"
+            wanted="$VERSION-$PKGREL"
+            if [[ "$current" == "$wanted" ]]; then
+              cmp -s aur-current/PKGBUILD dist/aur/PKGBUILD || \
+                { echo "AUR already has $wanted with different content; bump pkgrel" >&2; exit 1; }
+            elif [[ "$(printf '%s\n' "$current" "$wanted" | sort -V | tail -n1)" != "$wanted" ]]; then
+              echo "refusing to downgrade AUR $PKGNAME from $current to $wanted" >&2; exit 1
+            fi
+          fi
+
+      # No local archive sits in dist/aur, so makepkg downloads the published
+      # asset and verifies its checksum: the URL users will hit is what gets built.
+      - name: Build against the release asset in a clean Arch container
+        run: |
+          docker run --rm \
+            -v "$PWD/dist/aur:/pkg" \
+            -v "$PWD/packaging/aur/build.sh:/build.sh:ro" \
+            -e HOST_UID="$(id -u)" -e HOST_GID="$(id -g)" \
+            "$ARCH_IMAGE" bash /build.sh /pkg
+
+      - name: Compose commit message
+        id: msg
+        run: |
+          msg="Update to v$VERSION"; [[ "$PKGREL" == 1 ]] || msg="$msg-$PKGREL"
+          echo "message=$msg" >> "$GITHUB_OUTPUT"
+
+      - name: Publish PKGBUILD and .SRCINFO
+        uses: KSXGitHub/github-actions-deploy-aur@084b0d9b15415bf9cdb65d44dad1efe37a354050 # v4.2.0
+        with:
+          pkgname: hypr-sticky-hdr
+          pkgbuild: dist/aur/PKGBUILD
+          commit_username: hypr-sticky-hdr-bot
+          commit_email: hypr-sticky-hdr@users.noreply.github.com
+          ssh_private_key: ${{ secrets.AUR_SSH_KEY }}
+          commit_message: ${{ steps.msg.outputs.message }}
+          ssh_keyscan_types: ed25519

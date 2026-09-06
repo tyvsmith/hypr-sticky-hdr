@@ -3,7 +3,8 @@
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")"
 
-LUA=$(command -v lua5.4 || command -v lua) || { echo "no lua interpreter found"; exit 1; }
+LUA=${LUA:-$(command -v lua5.4 || command -v lua)} || true
+[[ -n "$LUA" ]] || { echo "no lua interpreter found"; exit 1; }
 
 rt=$(mktemp -d)
 trap 'rm -rf "$rt"' EXIT

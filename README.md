@@ -46,6 +46,25 @@ ignored instead of modesetting this one. A repeating reconcile check
 
 ## Installing
 
+### Arch Linux
+
+The `hypr-sticky-hdr` AUR package is the primary Arch installation:
+
+```bash
+paru -S hypr-sticky-hdr
+```
+
+- installs `sticky_hdr.lua` under `/usr/share/lua/<version>/hypr/`, on
+  Hyprland's default `package.path`, plus the README and license; pacman owns
+  every file
+- depends on `hyprland>=0.56` and `lua`; the module directory follows the
+  `lua` package version, which is the Lua that Hyprland links against
+- remove any copy in `${XDG_CONFIG_HOME:-$HOME/.config}/hypr/` first; on
+  Omarchy a user copy shadows the package
+- any AUR helper works; Omarchy ships `yay`
+
+### From source
+
 Clone the repository and install for the current user:
 
 ```bash
@@ -81,6 +100,8 @@ make install DESTDIR=/tmp/hypr-sticky-hdr-package prefix=/usr
 Set `LUA` or `LUA_VERSION` when the target runtime differs from the build host.
 `luadir` and `moduledir` are available for package-specific layouts.
 
+### Manual download
+
 For a manual user install:
 
 ```bash
@@ -101,16 +122,19 @@ For a manual user install:
 
 ### Release channels
 
-The project has not published a tagged release yet. Until it does, `main` is
-the only maintained source channel and can change. Replace `main` in the URL
-with a commit SHA when you need a reproducible install.
+- AUR: `hypr-sticky-hdr` tracks tagged releases. The release workflow
+  regenerates and pushes its `PKGBUILD` and `.SRCINFO`.
+- GitHub releases: each `vX.Y.Z` tag runs `distcheck` and publishes
+  `hypr-sticky-hdr-X.Y.Z.tar.gz` with a `.sha256` file. The workflow does not
+  create the tag.
+- `main`: development branch and the manual download source. It can change;
+  replace `main` in the URL with a commit SHA for a reproducible install.
 
-Pushing a future `vX.Y.Z` tag runs `distcheck` and publishes the matching source
-archive and checksum. The workflow does not create the tag.
-
-On [Omarchy](https://omarchy.org/), `~/.config` is already on `package.path`,
-so a user installation resolves as-is. For a user installation with a plain
-Lua config, add the config home before requiring:
+A system installation (the Arch package, or `sudo make install` matching
+Hyprland's Lua version) is on the stock `package.path`, so no prepend is
+needed. On [Omarchy](https://omarchy.org/), `~/.config` is also on
+`package.path`, so a user installation resolves as-is. For a user installation
+with a plain Lua config, add the config home before requiring:
 
 ```lua
 local config_home = os.getenv("XDG_CONFIG_HOME")
@@ -341,7 +365,9 @@ keep because `env` replaces the whole list.
 
 ## Updating
 
-Fetch a cloned source tree first:
+Arch package: `paru -Syu`, then review the migration notes above and reload.
+
+For a source installation, fetch the cloned tree first:
 
 ```bash
 git pull --ff-only
@@ -376,7 +402,8 @@ hyprctl configerrors
    restore the `render.cm_auto_hdr` setting you want Hyprland to own.
 2. Remove external `prewarm()` calls, including ScopeBuddy launch hooks.
 3. Remove the module with the same owner that installed it:
-   - package installation: use the package manager
+   - Arch package: `sudo pacman -Rns hypr-sticky-hdr`
+   - other package installation: use the package manager
    - `make install-user`: run `make uninstall-user`
    - direct `sudo make install`: run `sudo make uninstall` with the original
      `prefix` and no `DESTDIR`
@@ -419,6 +446,45 @@ make distcheck VERSION=X.Y.Z
 the checksum, runs the checks from the extracted archive, and tests staged
 system installation and removal. These targets do not create a tag or GitHub
 release. Archive builds also need GNU `tar`, `cp`, and `sha256sum`.
+
+### Arch packaging
+
+- `packaging/aur/PKGBUILD` is the template. `make pkgbuild VERSION=X.Y.Z
+  [PKGREL=N]` renders `dist/aur/PKGBUILD` from
+  `dist/hypr-sticky-hdr-X.Y.Z.tar.gz.sha256`: run `make dist` first, or drop
+  the published `.sha256` there. `distcheck` also renders it.
+- `packaging/aur/build.sh` builds, lints with `namcap`, installs, and
+  smoke-tests the rendered package inside an `archlinux:base-devel` container.
+  CI runs it on every pull request against a `0.0.0` archive, and weekly so a
+  Lua major.minor bump on Arch shows up before users hit it.
+- When Arch bumps `lua`, the installed module path changes with it. Republish
+  the same version with a higher `PKGREL` so pacman rebuilds it.
+- Run it locally with rootless podman (with docker, pass your own uid and gid
+  as `HOST_UID` and `HOST_GID`):
+
+```bash
+make dist VERSION=0.0.0 && make pkgbuild VERSION=0.0.0
+cp dist/hypr-sticky-hdr-0.0.0.tar.gz dist/aur/
+podman run --rm -v "$PWD/dist/aur:/pkg" \
+  -v "$PWD/packaging/aur/build.sh:/build.sh:ro" \
+  -e HOST_UID=0 -e HOST_GID=0 \
+  docker.io/library/archlinux:base-devel bash /build.sh /pkg
+```
+
+- Publishing: pushing `vX.Y.Z` runs the release workflow. After the GitHub
+  release is public, its `publish-aur` job calls `aur.yml`, which downloads the
+  asset, renders and builds the recipe, then pushes `PKGBUILD` and `.SRCINFO`
+  with the `AUR_SSH_KEY` secret from the `aur` environment.
+- Packaging-only republish of a released version:
+  `gh workflow run aur.yml --ref main -f version=X.Y.Z -f pkgrel=2`
+- Manual fallback from an AUR clone:
+
+```bash
+git clone ssh://aur@aur.archlinux.org/hypr-sticky-hdr.git
+cp dist/aur/PKGBUILD hypr-sticky-hdr/ && cd hypr-sticky-hdr
+makepkg --printsrcinfo > .SRCINFO
+git add PKGBUILD .SRCINFO && git commit -m "Update to vX.Y.Z" && git push
+```
 
 ## License
 
