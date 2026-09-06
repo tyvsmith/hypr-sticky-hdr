@@ -15,6 +15,8 @@ concurrency:
 jobs:
   release:
     runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.tag.outputs.version }}
 
     steps:
       - name: Check out release tag
@@ -23,6 +25,7 @@ jobs:
           persist-credentials: false
 
       - name: Validate release tag
+        id: tag
         shell: bash
         run: |
           if [[ ! "$GITHUB_REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
@@ -30,6 +33,7 @@ jobs:
             exit 2
           fi
           echo "VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
+          echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
 
       - name: Install test dependencies
         run: |
@@ -73,3 +77,12 @@ jobs:
           fi
           gh release upload "$GITHUB_REF_NAME" "$archive" "$checksum" --clobber
           gh release edit "$GITHUB_REF_NAME" --draft=false --latest
+
+  publish-aur:
+    needs: release
+    permissions:
+      contents: read
+    uses: ./.github/workflows/aur.yml
+    with:
+      version: ${{ needs.release.outputs.version }}
+    secrets: inherit

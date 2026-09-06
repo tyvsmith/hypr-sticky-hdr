@@ -122,6 +122,8 @@ For a manual user install:
 
 ### Release channels
 
+- AUR: `hypr-sticky-hdr` tracks tagged releases. The release workflow
+  regenerates and pushes its `PKGBUILD` and `.SRCINFO`.
 - GitHub releases: each `vX.Y.Z` tag runs `distcheck` and publishes
   `hypr-sticky-hdr-X.Y.Z.tar.gz` with a `.sha256` file. The workflow does not
   create the tag.
@@ -467,6 +469,21 @@ podman run --rm -v "$PWD/dist/aur:/pkg" \
   -v "$PWD/packaging/aur/build.sh:/build.sh:ro" \
   -e HOST_UID=0 -e HOST_GID=0 \
   docker.io/library/archlinux:base-devel bash /build.sh /pkg
+```
+
+- Publishing: pushing `vX.Y.Z` runs the release workflow. After the GitHub
+  release is public, its `publish-aur` job calls `aur.yml`, which downloads the
+  asset, renders and builds the recipe, then pushes `PKGBUILD` and `.SRCINFO`
+  with the `AUR_SSH_KEY` secret from the `aur` environment.
+- Packaging-only republish of a released version:
+  `gh workflow run aur.yml --ref main -f version=X.Y.Z -f pkgrel=2`
+- Manual fallback from an AUR clone:
+
+```bash
+git clone ssh://aur@aur.archlinux.org/hypr-sticky-hdr.git
+cp dist/aur/PKGBUILD hypr-sticky-hdr/ && cd hypr-sticky-hdr
+makepkg --printsrcinfo > .SRCINFO
+git add PKGBUILD .SRCINFO && git commit -m "Update to vX.Y.Z" && git push
 ```
 
 ## License
