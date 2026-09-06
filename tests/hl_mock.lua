@@ -1,5 +1,6 @@
 -- Mock of the `hl` global that Hyprland's Lua config exposes, covering the
--- slice sticky_hdr.lua uses: monitor(), timer(), on(), get_windows(), env().
+-- slice sticky_hdr.lua uses: monitor(), config(), timer(), on(), get_windows(),
+-- and env().
 -- Faithful where it matters: timers only fire while enabled, get_windows
 -- honors a {monitor = name} filter, events fan out to every handler.
 
@@ -8,11 +9,14 @@ local M = {}
 function M.new()
   local state = {
     applied = {}, -- every spec passed to hl.monitor, in order
+    configs = {}, -- every spec passed to hl.config, in order
+    actions = {}, -- successful monitor/config calls, in order
     timers = {}, -- {cb, timeout, type, enabled}
     handlers = {}, -- event name -> list of callbacks
     windows = {}, -- current window list
     gw_calls = 0, -- get_windows invocation count
     monitor_error = nil, -- set to a string to make hl.monitor throw once
+    config_error = nil, -- set to a string to make hl.config throw once
   }
 
   local hl = {}
@@ -24,6 +28,17 @@ function M.new()
       error(err)
     end
     table.insert(state.applied, spec)
+    table.insert(state.actions, { kind = "monitor", spec = spec })
+  end
+
+  function hl.config(spec)
+    if state.config_error then
+      local err = state.config_error
+      state.config_error = nil
+      error(err)
+    end
+    table.insert(state.configs, spec)
+    table.insert(state.actions, { kind = "config", spec = spec })
   end
 
   function hl.timer(cb, opts)

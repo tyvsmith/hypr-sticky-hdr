@@ -7,7 +7,14 @@ local MOCK = dofile(DIR .. "hl_mock.lua")
 local SRC = DIR .. "../sticky_hdr.lua"
 
 local RT = assert(os.getenv("XDG_RUNTIME_DIR"), "run via run.sh: XDG_RUNTIME_DIR unset")
-local STATE_FILE = RT .. "/hypr-sticky-hdr-prewarm"
+local STATE_FILE_PREFIX = RT .. "/hypr-sticky-hdr-prewarm"
+
+local function scoped_state_file(output)
+  local key = output == "" and "all" or output:gsub(".", function(c)
+    return string.format("%02x", string.byte(c))
+  end)
+  return STATE_FILE_PREFIX .. "-" .. key
+end
 
 local COOLDOWN_MS = 2000
 local PREWARM_MS = 10000
@@ -35,7 +42,11 @@ local function eq(got, want, label)
 end
 
 local function fresh(keep_state)
-  if not keep_state then os.remove(STATE_FILE) end
+  if not keep_state then
+    os.remove(scoped_state_file(""))
+    os.remove(scoped_state_file("DP-1"))
+    os.remove(scoped_state_file("DP-3"))
+  end
   local hl, state = MOCK.new()
   _G.hl = hl
   local mod = assert(loadfile(SRC))()
@@ -75,6 +86,249 @@ local function settle(state)
 end
 
 local function cm_of(spec) return spec and spec.cm end
+local function auto_hdr_of(spec)
+  return spec and spec.render and spec.render.cm_auto_hdr
+end
+
+local function count_config(state, value)
+  local count = 0
+  for _, spec in ipairs(state.configs) do
+    if auto_hdr_of(spec) == value then count = count + 1 end
+  end
+  return count
+end
+
+local function handler_count(state)
+  local count = 0
+  for _, handlers in pairs(state.handlers) do count = count + #handlers end
+  return count
+end
+
+T("default_baseline_applies_sdr_config", function()
+  local mod, _, state = fresh()
+  mod.setup(mkopts())
+  eq(state.actions[1].kind, "monitor", "baseline monitor action")
+  eq(cm_of(state.actions[1].spec), "srgb", "baseline SDR monitor")
+  eq(state.actions[2].kind, "config", "baseline config action")
+  eq(#state.actions, 2, "baseline action count")
+  eq(auto_hdr_of(state.configs[1]), 1, "baseline config")
+end)
+
+T("global_config_wraps_monitor_transitions", function()
+  local mod, _, state = fresh()
+  mod.setup(mkopts())
+  state.actions = {}
+
+  local w = win(state, { class = "gamescope" })
+  MOCK.fire(state, "window.open")
+  settle(state)
+  eq(state.actions[1].kind, "config", "first HDR action")
+  eq(auto_hdr_of(state.actions[1].spec), 0, "HDR config")
+  eq(state.actions[2].kind, "monitor", "second HDR action")
+  eq(cm_of(state.actions[2].spec), "hdr", "HDR monitor")
+
+  state.actions = {}
+  remove_win(state, w)
+  MOCK.fire(state, "window.close")
+  settle(state)
+  local cds = MOCK.timers_with_timeout(state, COOLDOWN_MS)
+  MOCK.fire_timer(cds[#cds])
+  eq(state.actions[1].kind, "monitor", "first SDR action")
+  eq(cm_of(state.actions[1].spec), "srgb", "SDR monitor")
+  eq(state.actions[2].kind, "config", "second SDR action")
+  eq(auto_hdr_of(state.actions[2].spec), 1, "SDR config")
+  eq(#state.actions, 2, "SDR transition action count")
+end)
+
+T("structured_states_override_monitor_and_config", function()
+  local mod, _, state = fresh()
+  mod.setup(mkopts({
+    sdr = {
+      monitor = { cm = "scrgb" },
+      config = { render = { cm_auto_hdr = 7 } },
+    },
+    hdr = {
+      monitor = { cm = "dcip3" },
+      config = { render = { cm_auto_hdr = 8 } },
+    },
+  }))
+  eq(cm_of(MOCK.last_applied(state)), "scrgb", "structured SDR monitor")
+  eq(auto_hdr_of(state.configs[#state.configs]), 7, "structured SDR config")
+  win(state, { class = "gamescope" })
+  MOCK.fire(state, "window.open")
+  settle(state)
+  eq(cm_of(MOCK.last_applied(state)), "dcip3", "structured HDR monitor")
+  eq(auto_hdr_of(state.configs[#state.configs]), 8, "structured HDR config")
+end)
+
+T("structured_states_inherit_missing_members", function()
+  local mod, _, state = fresh()
+  mod.setup(mkopts({
+    sdr = { config = { render = { cm_auto_hdr = 7 } } },
+    hdr = { monitor = { cm = "dcip3" } },
+  }))
+  eq(cm_of(MOCK.last_applied(state)), "srgb", "default SDR monitor")
+  eq(auto_hdr_of(state.configs[#state.configs]), 7, "custom SDR config")
+  win(state, { class = "gamescope" })
+  MOCK.fire(state, "window.open")
+  settle(state)
+  eq(cm_of(MOCK.last_applied(state)), "dcip3", "custom HDR monitor")
+  eq(auto_hdr_of(state.configs[#state.configs]), 0, "default HDR config")
+end)
+
+T("structured_states_reject_non_table_members", function()
+  local mod = fresh()
+  local ok = pcall(mod.setup, mkopts({ hdr = { monitor = false } }))
+  eq(ok, false, "non-table monitor member")
+end)
+
+T("flat_states_are_rejected", function()
+  local mod = fresh()
+  local ok, err = pcall(mod.setup, mkopts({ hdr = { cm = "hdr" } }))
+  eq(ok, false, "flat HDR state")
+  assert(tostring(err):find("unknown state member 'cm'", 1, true),
+    "unclear unknown-member error: " .. tostring(err))
+end)
+
+T("hybrid_states_are_rejected", function()
+  local mod = fresh()
+  local ok, err = pcall(mod.setup, mkopts({
+    hdr = { monitor = { cm = "dcip3" }, cm = "hdr" },
+  }))
+  eq(ok, false, "hybrid HDR state")
+  assert(tostring(err):find("unknown state member 'cm'", 1, true),
+    "unclear unknown-member error: " .. tostring(err))
+end)
+
+T("global_hdr_config_waits_for_last_output_cooldown", function()
+  local mod, _, state = fresh()
+  mod.setup(mkopts({ monitor = { output = "DP-1", mode = "preferred" } }))
+  mod.setup(mkopts({ monitor = { output = "DP-3", mode = "preferred" } }))
+  local dp1 = win(state, { class = "gamescope", output = "DP-1" })
+  local dp3 = win(state, { class = "gamescope", output = "DP-3" })
+  MOCK.fire(state, "window.open")
+  settle(state)
+  eq(count_config(state, 0), 1, "one global HDR config apply")
+
+  remove_win(state, dp1)
+  MOCK.fire(state, "window.close")
+  settle(state)
+  for _, t in ipairs(MOCK.timers_with_timeout(state, COOLDOWN_MS)) do
+    MOCK.fire_timer(t)
+  end
+  eq(auto_hdr_of(state.configs[#state.configs]), 0,
+    "HDR config while DP-3 remains active")
+
+  remove_win(state, dp3)
+  MOCK.fire(state, "window.close")
+  settle(state)
+  for _, t in ipairs(MOCK.timers_with_timeout(state, COOLDOWN_MS)) do
+    MOCK.fire_timer(t)
+  end
+  eq(auto_hdr_of(state.configs[#state.configs]), 1,
+    "SDR config after DP-3 cooldown")
+end)
+
+T("setup_rejects_conflicting_global_configs", function()
+  local mod = fresh()
+  mod.setup(mkopts({ monitor = { output = "DP-1" } }))
+  local ok, err = pcall(mod.setup, mkopts({
+    monitor = { output = "DP-3" },
+    hdr = { config = { render = { cm_auto_hdr = 9 } } },
+  }))
+  eq(ok, false, "conflicting setup")
+  assert(tostring(err):find("matching sdr/hdr config tables", 1, true),
+    "unclear conflict error: " .. tostring(err))
+end)
+
+T("invalid_first_setup_does_not_claim_global_config", function()
+  local mod, _, state = fresh()
+  local ok = pcall(mod.setup, mkopts({
+    cooldown_sec = math.huge,
+    sdr = { config = { render = { cm_auto_hdr = 7 } } },
+  }))
+  eq(ok, false, "invalid first setup")
+  eq(#state.actions, 0, "Hyprland monitor/config calls")
+  eq(#state.timers, 0, "Hyprland timer calls")
+  eq(handler_count(state), 0, "Hyprland event registrations")
+  eq(state.gw_calls, 0, "Hyprland window queries")
+
+  mod.setup(mkopts())
+  eq(auto_hdr_of(state.configs[#state.configs]), 1,
+    "corrected setup uses default config")
+end)
+
+T("failed_first_baseline_does_not_claim_global_config", function()
+  local mod, _, state = fresh()
+  win(state, { class = "gamescope" })
+  state.monitor_error = "baseline failed"
+  local ok = pcall(mod.setup, mkopts({
+    sdr = { config = { render = { cm_auto_hdr = 7 } } },
+    hdr = { config = { render = { cm_auto_hdr = 8 } } },
+  }))
+  eq(ok, false, "failed first baseline")
+  eq(#state.timers, 0, "failed setup timers")
+  eq(handler_count(state), 0, "failed setup handlers")
+
+  state.windows = {}
+  mod.setup(mkopts())
+  eq(auto_hdr_of(state.configs[#state.configs]), 1,
+    "corrected setup reapplies default SDR config")
+end)
+
+T("failed_sdr_config_retries_without_reapplying_monitor", function()
+  local mod, _, state = fresh()
+  local h = mod.setup(mkopts())
+  local w = win(state, { class = "gamescope" })
+  MOCK.fire(state, "window.open")
+  settle(state)
+  remove_win(state, w)
+  MOCK.fire(state, "window.close")
+  settle(state)
+
+  state.actions = {}
+  state.config_error = "SDR config failed"
+  local cds = MOCK.timers_with_timeout(state, COOLDOWN_MS)
+  local ok = pcall(MOCK.fire_timer, cds[#cds])
+  eq(ok, false, "failed SDR config")
+  eq(h.in_hdr(), false, "monitor state after failed SDR config")
+  eq(state.actions[1].kind, "monitor", "SDR monitor before failure")
+  eq(#state.actions, 1, "no successful SDR config action")
+  eq(auto_hdr_of(state.configs[#state.configs]), 0,
+    "global state remains HDR")
+
+  state.actions = {}
+  MOCK.fire(state, "window.open")
+  settle(state)
+  eq(state.actions[1].kind, "config", "no-demand config retry")
+  eq(auto_hdr_of(state.actions[1].spec), 1, "retried SDR config")
+  eq(#state.actions, 1, "retry avoids a redundant monitor call")
+end)
+
+T("hdr_return_after_failed_sdr_config_reapplies_hdr_monitor", function()
+  local mod, _, state = fresh()
+  local h = mod.setup(mkopts())
+  local w = win(state, { class = "gamescope" })
+  MOCK.fire(state, "window.open")
+  settle(state)
+  remove_win(state, w)
+  MOCK.fire(state, "window.close")
+  settle(state)
+
+  state.config_error = "SDR config failed"
+  local cds = MOCK.timers_with_timeout(state, COOLDOWN_MS)
+  pcall(MOCK.fire_timer, cds[#cds])
+  eq(h.in_hdr(), false, "monitor state after failed SDR config")
+
+  state.actions = {}
+  win(state, { class = "gamescope" })
+  MOCK.fire(state, "window.open")
+  settle(state)
+  eq(state.actions[1].kind, "monitor", "HDR monitor reapplied")
+  eq(cm_of(state.actions[1].spec), "hdr", "reapplied monitor state")
+  eq(#state.actions, 1, "existing HDR config is retained")
+  eq(h.in_hdr(), true, "instance returns to HDR")
+end)
 
 -- 1. Sanity: a window of a listed class flips the monitor to the hdr spec.
 T("class_window_triggers_hdr", function()
@@ -158,10 +412,13 @@ T("sdr_reapplied_on_monitor_added_without_demand", function()
   local mod, _, state = fresh()
   mod.setup(mkopts())
   local before = #state.applied
+  state.actions = {}
   MOCK.fire(state, "monitor.added", { name = "DP-3" })
   settle(state)
   assert(#state.applied > before, "nothing re-applied on monitor.added")
   eq(cm_of(MOCK.last_applied(state)), "srgb", "re-applied spec")
+  eq(state.actions[1].kind, "monitor", "forced SDR monitor")
+  eq(#state.actions, 1, "forced SDR avoids redundant config")
 end)
 
 -- 7. An instance bound to a named output ignores another output's hotplug.
@@ -278,6 +535,35 @@ T("prewarm_hold_survives_reload", function()
   eq(cm_of(MOCK.last_applied(state2)), "hdr", "baseline after mid-hold reload")
 end)
 
+T("persisted_prewarm_is_scoped_to_output", function()
+  local mod = fresh()
+  local dp1 = mod.setup(mkopts({ monitor = { output = "DP-1" } }))
+  mod.setup(mkopts({ monitor = { output = "DP-3" } }))
+  dp1.prewarm()
+
+  local mod2 = fresh(true)
+  local dp1_reloaded = mod2.setup(mkopts({ monitor = { output = "DP-1" } }))
+  local dp3_reloaded = mod2.setup(mkopts({ monitor = { output = "DP-3" } }))
+  eq(dp1_reloaded.in_hdr(), true, "DP-1 persisted prewarm")
+  eq(dp3_reloaded.in_hdr(), false, "DP-3 remains SDR")
+end)
+
+T("expiring_one_prewarm_preserves_other_output_hold", function()
+  local mod, _, state = fresh()
+  local dp1 = mod.setup(mkopts({ monitor = { output = "DP-1" } }))
+  local dp3 = mod.setup(mkopts({ monitor = { output = "DP-3" } }))
+  dp1.prewarm()
+  local dp1_hold = state.timers[#state.timers]
+  dp3.prewarm()
+  MOCK.fire_timer(dp1_hold)
+
+  local mod2 = fresh(true)
+  local dp1_reloaded = mod2.setup(mkopts({ monitor = { output = "DP-1" } }))
+  local dp3_reloaded = mod2.setup(mkopts({ monitor = { output = "DP-3" } }))
+  eq(dp1_reloaded.in_hdr(), false, "expired DP-1 hold")
+  eq(dp3_reloaded.in_hdr(), true, "DP-3 hold survives DP-1 expiry")
+end)
+
 -- 13b. The persisted deadline dies with the hold: once it expires and the
 -- module reverts, a reload must not resurrect the hold from disk.
 T("expired_hold_not_resumed_after_reload", function()
@@ -336,6 +622,10 @@ T("failed_hdr_apply_retries_on_next_event", function()
   MOCK.fire(state, "window.open")
   settle(state)
   eq(h.in_hdr(), false, "in_hdr after failed apply")
+  eq(auto_hdr_of(state.configs[#state.configs - 1]), 0,
+    "HDR config applied before failed monitor")
+  eq(auto_hdr_of(state.configs[#state.configs]), 1,
+    "failed first HDR monitor rolls config back to SDR")
   win(state, { class = "gamescope" })
   MOCK.fire(state, "window.open")
   settle(state)

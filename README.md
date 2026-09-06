@@ -2,13 +2,13 @@
 
 Sticky HDR for [Hyprland](https://hyprland.org/)'s Lua config. Keeps a monitor
 in HDR for as long as an HDR window lives, not just while it is fullscreen.
-Hyprland's own `render:cm_auto_hdr` drops to SDR on every alt-tab; this module
-holds HDR until the last HDR window is gone, plus a short cooldown.
+Hyprland's own `render:cm_auto_hdr` drops to SDR on every alt-tab. This module
+disables that automation while it holds HDR, then restores it after the last
+HDR window is gone plus a short cooldown.
 
 One file, no daemon, no dependencies. Hyprland calls the module's Lua callbacks
 directly, so the external process the old implementation needed (socat, jq, IPC
-socket) is gone. Requires the Lua config introduced in Hyprland 0.55; written
-and tested against 0.56.
+socket) is gone. Requires Hyprland 0.56.
 
 ## How it works
 
@@ -22,6 +22,12 @@ When the last such window closes, the module waits `cooldown_sec` (default 2s)
 and reverts to the `sdr` spec. The cooldown runs from the last close: a window
 that opens and shuts during a pending cooldown restarts it at full length
 rather than inheriting the nearly expired deadline.
+
+The first managed output entering HDR applies the global HDR config before its
+monitor spec. The config stays active while any managed output remains in HDR.
+The last output queues its SDR monitor spec before restoring the global SDR
+config. Hyprland applies queued monitor rules before `cm_auto_hdr` runs on the
+next render.
 
 A monitor that disconnects and returns gets its full current state re-applied
 (Hyprland re-applies its own rules on reconnect, wiping fields like `bitdepth`
@@ -70,10 +76,23 @@ require("hypr.sticky_hdr").setup({
 })
 ```
 
-`setup()` applies `monitor` merged with the `sdr` overlay (default
-`{ cm = "srgb" }`) at startup, and swaps to `monitor` merged with the `hdr`
-overlay (default `{ cm = "hdr" }`) while HDR demand exists. Windows already
-open are adopted at startup, so a config reload mid-game does not flash SDR.
+`setup()` applies `monitor` merged with the SDR monitor overlay at startup, then
+swaps to the HDR monitor overlay while HDR demand exists. It also applies the
+state's compositor-wide `hl.config` table. The defaults are:
+
+```lua
+sdr = {
+  monitor = { cm = "srgb" },
+  config = { render = { cm_auto_hdr = 1 } },
+}
+hdr = {
+  monitor = { cm = "hdr" },
+  config = { render = { cm_auto_hdr = 0 } },
+}
+```
+
+Windows already open are adopted at startup, so a config reload mid-game does
+not flash SDR.
 
 ### Why the full spec
 
@@ -92,8 +111,8 @@ opens. That is why the module takes a spec instead of inferring one.
 | Key | Default | Description |
 |---|---|---|
 | `monitor` | required | Full `hl.monitor` spec, the base for both states |
-| `sdr` | `{ cm = "srgb" }` | Overlay merged over `monitor` for the SDR state |
-| `hdr` | `{ cm = "hdr" }` | Overlay merged over `monitor` for the HDR state |
+| `sdr` | see above | SDR monitor overlay and global config |
+| `hdr` | see above | HDR monitor overlay and global config |
 | `env` | `{ "DXVK_HDR=1", "HYPR_STICKY_HDR=1" }` | Whole `NAME=value` environ entries that mark a process as HDR |
 | `classes` | `{ "gamescope" }` | Window classes that always count as HDR |
 | `cooldown_sec` | `2` | Seconds to linger in HDR after the last HDR window closes |
@@ -101,21 +120,22 @@ opens. That is why the module takes a spec instead of inferring one.
 | `reconcile_sec` | `30` | Seconds between safety-net re-checks for missed events (`0` disables) |
 | `environ_reader` | `/proc` reader | `function(pid) -> string\|nil` overriding how a process's environ is read (tests, exotic setups) |
 
-The overlays can change any field, not just color: a lower refresh rate in HDR,
-different brightness, anything `hl.monitor` accepts. Overlays and lists
-**replace** their defaults rather than merging: a custom `hdr` must restate
-`cm = "hdr"`, and a custom `classes` must restate `"gamescope"` if you still
-want it.
+State members inherit their defaults when omitted. A supplied `monitor` or
+`config` member replaces that member's default instead of merging with it. A
+custom monitor overlay must therefore restate `cm`, and a custom config must
+include every global setting the state needs. Monitor overlays can change any
+field that `hl.monitor` accepts.
 
-Upgrading from the bash daemon: the defaults no longer match
-`PROTON_ENABLE_HDR=1` (retired from current Proton builds) or
-`ENABLE_HDR_WSI=1`. If your runner still uses either, pass the full list via
-`env`.
+State overrides must use the structured `monitor` and `config` members shown
+above. Lists replace their defaults, so custom `classes` must restate
+`"gamescope"` if you still want it.
 
 `setup()` returns a handle with `wants_hdr()` (real window demand; prewarm
 holds excluded), `in_hdr()`, and `prewarm()`. Multi-monitor: call `setup()`
 once per output, each with its own named spec. Demand is scoped to the
-instance's output, so a game on one monitor leaves the others in SDR.
+instance's output, so a game on one monitor leaves the others in SDR. All calls
+share one global config arbiter and must supply deeply equal SDR/HDR config
+tables. Monitor overlays may differ per output.
 
 ## Prewarming for gamescope
 
@@ -125,11 +145,12 @@ though gamescope's own window would flip the monitor to HDR a moment later.
 
 `M.prewarm()` enters HDR ahead of any window and holds it for `prewarm_sec`
 (default 10s). A qualifying window arriving inside the hold takes over normal
-stickiness; otherwise the hold expires and the usual cooldown revert runs. The
-hold's deadline is persisted to `$XDG_RUNTIME_DIR`, so a config reload that
-recreates Hyprland's Lua VM mid-launch (Omarchy reloads on every file save)
-resumes the hold instead of dropping to SDR right before gamescope's probe. It
-is callable from outside the compositor:
+stickiness; otherwise the hold expires and the usual cooldown revert runs.
+The hold deadline is persisted separately for each output in
+`$XDG_RUNTIME_DIR`, so a config reload that recreates Hyprland's Lua VM
+mid-launch (Omarchy reloads on every file save) resumes only that output's hold
+instead of dropping it to SDR right before gamescope's probe. It is callable
+from outside the compositor:
 
 ```bash
 hyprctl eval "require('hypr.sticky_hdr').prewarm()"
@@ -200,13 +221,6 @@ tests/run.sh
 ```
 
 Needs bash and a `lua`/`lua5.4` interpreter, nothing else.
-
-## Still on hyprlang?
-
-The previous implementation, an external bash daemon doing the same detection
-over Hyprland's IPC socket, lives on the
-[`hyprlang-legacy`](https://github.com/tyvsmith/hypr-sticky-hdr/tree/hyprlang-legacy)
-branch. It is unmaintained.
 
 ## License
 
