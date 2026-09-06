@@ -373,7 +373,11 @@ function M.setup(opts)
   -- prewarm hold, so a config reload mid-game or mid-launch does not flash
   -- SDR right as gamescope probes the output.
   local resume_ms = persisted_hold(OUTPUT, PREWARM_MS)
-  if resume_ms > 0 then prewarm_gen = prewarm_gen + 1 end
+  if resume_ms > 0 then
+    prewarm_gen = prewarm_gen + 1
+  else
+    os.remove(state_file(OUTPUT))
+  end
   local want = demand()
   local baseline_ok, baseline_err = pcall(transition, want, true)
   if not baseline_ok then

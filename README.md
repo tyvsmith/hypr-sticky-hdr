@@ -127,8 +127,10 @@ include every global setting the state needs. Monitor overlays can change any
 field that `hl.monitor` accepts.
 
 State overrides must use the structured `monitor` and `config` members shown
-above. Lists replace their defaults, so custom `classes` must restate
-`"gamescope"` if you still want it.
+above.
+
+List options replace their defaults: a custom `classes` list must restate
+`"gamescope"` to keep it.
 
 `setup()` returns a handle with `wants_hdr()` (real window demand; prewarm
 holds excluded), `in_hdr()`, and `prewarm()`. Multi-monitor: call `setup()`

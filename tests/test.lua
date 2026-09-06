@@ -540,6 +540,9 @@ T("persisted_prewarm_is_scoped_to_output", function()
   local dp1 = mod.setup(mkopts({ monitor = { output = "DP-1" } }))
   mod.setup(mkopts({ monitor = { output = "DP-3" } }))
   dp1.prewarm()
+  local f = assert(io.open(scoped_state_file("DP-1"), "r"),
+    "prewarm did not write the expected per-output state file")
+  f:close()
 
   local mod2 = fresh(true)
   local dp1_reloaded = mod2.setup(mkopts({ monitor = { output = "DP-1" } }))
@@ -562,6 +565,19 @@ T("expiring_one_prewarm_preserves_other_output_hold", function()
   local dp3_reloaded = mod2.setup(mkopts({ monitor = { output = "DP-3" } }))
   eq(dp1_reloaded.in_hdr(), false, "expired DP-1 hold")
   eq(dp3_reloaded.in_hdr(), true, "DP-3 hold survives DP-1 expiry")
+end)
+
+T("expired_prewarm_file_is_removed_on_setup", function()
+  local mod = fresh()
+  local path = scoped_state_file("DP-1")
+  local f = assert(io.open(path, "w"))
+  f:write(tostring(os.time() - 1))
+  f:close()
+
+  mod.setup(mkopts({ monitor = { output = "DP-1" } }))
+  local stale = io.open(path, "r")
+  if stale then stale:close() end
+  eq(stale, nil, "expired prewarm file")
 end)
 
 -- 13b. The persisted deadline dies with the hold: once it expires and the
