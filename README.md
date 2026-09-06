@@ -60,26 +60,43 @@ updates that copy. Remove it with `make uninstall-user` after unwiring the
 module as described under [Uninstalling](#uninstalling). These targets only
 copy or remove the module; they do not edit your Hyprland configuration.
 
-Packagers can stage a system installation with GNU-style `DESTDIR` and
-`prefix` variables:
+For a direct system installation:
+
+```bash
+make install
+```
+
+The default prefix is `/usr/local`. The target derives the Lua major.minor
+version and installs under the standard
+`$(prefix)/share/lua/$(LUA_VERSION)/hypr/sticky_hdr.lua` path, where
+`require("hypr.sticky_hdr")` resolves without a `package.path` change. It also
+installs the README and license.
+
+Packagers can stage the same files with GNU-style variables:
 
 ```bash
 make install DESTDIR=/tmp/hypr-sticky-hdr-package prefix=/usr
-make uninstall DESTDIR=/tmp/hypr-sticky-hdr-package prefix=/usr
 ```
 
-The default system prefix is `/usr/local`. With `prefix=/usr`, the module lands
-at `/usr/share/hypr-sticky-hdr/hypr/sticky_hdr.lua`; the target also installs
-the README and license. Add `/usr/share/hypr-sticky-hdr/?.lua` to
-`package.path` before requiring `hypr.sticky_hdr`. Substitute the chosen prefix
-when installing elsewhere.
+Set `LUA` or `LUA_VERSION` when the target runtime differs from the build host.
+`luadir` and `moduledir` are available for package-specific layouts.
 
 For a manual user install:
 
 ```bash
-mkdir -p "${XDG_CONFIG_HOME:-$HOME/.config}/hypr"
-curl -fsSL https://raw.githubusercontent.com/tyvsmith/hypr-sticky-hdr/main/sticky_hdr.lua \
-  -o "${XDG_CONFIG_HOME:-$HOME/.config}/hypr/sticky_hdr.lua"
+(
+  set -eu
+  module_dir="${XDG_CONFIG_HOME:-$HOME/.config}/hypr"
+  install -d "$module_dir"
+  tmp=$(mktemp "$module_dir/.sticky_hdr.lua.XXXXXX")
+  trap 'rm -f "$tmp"' EXIT
+  curl -fsSL https://raw.githubusercontent.com/tyvsmith/hypr-sticky-hdr/main/sticky_hdr.lua \
+    -o "$tmp"
+  test -s "$tmp"
+  chmod 0644 "$tmp"
+  mv -f "$tmp" "$module_dir/sticky_hdr.lua"
+  trap - EXIT
+)
 ```
 
 ### Release channels
@@ -92,8 +109,8 @@ Pushing a future `vX.Y.Z` tag runs `distcheck` and publishes the matching source
 archive and checksum. The workflow does not create the tag.
 
 On [Omarchy](https://omarchy.org/), `~/.config` is already on `package.path`,
-so `require("hypr.sticky_hdr")` resolves as-is. On a plain Lua config, add the
-path yourself before requiring:
+so a user installation resolves as-is. For a user installation with a plain
+Lua config, add the config home before requiring:
 
 ```lua
 local config_home = os.getenv("XDG_CONFIG_HOME")
@@ -285,22 +302,6 @@ Then launch a window with `HYPR_STICKY_HDR=1` and inspect `hyprctl monitors`
 while it is open and after the cooldown. This checks the real compositor path;
 the repository test suite does not.
 
-## Updating
-
-For a cloned user installation:
-
-```bash
-git pull --ff-only
-make check
-make install-user
-hyprctl reload
-```
-
-For a system installation, rerun `make install` with the same `prefix` and
-`DESTDIR` values. For a manual installation, repeat the download command.
-Review [Migrating](#migrating) before updating because `main` may contain
-breaking configuration changes.
-
 ## Migrating
 
 ### From flat Lua state overrides
@@ -323,10 +324,13 @@ replaces that default member.
 
 ### From the legacy daemon
 
-Remove the `exec-once = hypr-sticky-hdr daemon` autostart entry,
-`~/.local/bin/hypr-sticky-hdr`, and `~/.config/hypr-sticky-hdr/` before loading
-the Lua module. Running both implementations makes them compete for monitor
-state. The old code remains on the unmaintained
+Back up `${XDG_CONFIG_HOME:-$HOME/.config}/hypr-sticky-hdr/`, then translate
+any settings you still need into `setup()` before deleting that directory.
+Remove the `exec-once = hypr-sticky-hdr daemon` autostart entry, then stop the
+running daemon or restart the Hyprland session before loading the Lua module.
+Running both implementations makes them compete for monitor state. Remove
+`~/.local/bin/hypr-sticky-hdr` after the migration. The old code remains on the
+unmaintained
 [`hyprlang-legacy`](https://github.com/tyvsmith/hypr-sticky-hdr/tree/hyprlang-legacy)
 branch for reference.
 
@@ -334,14 +338,47 @@ The Lua defaults no longer match `PROTON_ENABLE_HDR=1` or `ENABLE_HDR_WSI=1`.
 If a runner still needs them, include them alongside any defaults you want to
 keep because `env` replaces the whole list.
 
+## Updating
+
+Fetch a cloned source tree first:
+
+```bash
+git pull --ff-only
+```
+
+Review the migration notes above and adjust your config before replacing the
+installed module. Then update a user installation:
+
+```bash
+make check
+make install-user
+```
+
+For a direct system installation, run `make check`, then rerun `make install`
+with the original `prefix` and no `DESTDIR`. For a manual user installation,
+repeat the atomic download above after reviewing the current migration notes.
+
+Use the package manager to update package-owned files. Packagers use `DESTDIR`
+only to stage package contents; it is not a live installation root.
+
+Reload after any update:
+
+```bash
+hyprctl reload
+hyprctl configerrors
+```
+
 ## Uninstalling
 
 1. Replace each `setup()` call with the original `hl.monitor(...)` call, and
    restore the `render.cm_auto_hdr` setting you want Hyprland to own.
 2. Remove external `prewarm()` calls, including ScopeBuddy launch hooks.
-3. Run `make uninstall-user`, or rerun `make uninstall` with the same `prefix`
-   and `DESTDIR` used for the system installation. Delete the module manually
-   if you installed it with `curl`.
+3. Remove the module with the same owner that installed it:
+   - package installation: use the package manager
+   - `make install-user`: run `make uninstall-user`
+   - direct `make install`: run `make uninstall` with the original `prefix` and
+     no `DESTDIR`
+   - manual download: delete the installed `sticky_hdr.lua`
 4. Remove `${XDG_RUNTIME_DIR:-/tmp}/hypr-sticky-hdr-prewarm-*` if you want to
    discard saved prewarm deadlines.
 5. Run `hyprctl reload` and `hyprctl configerrors`.
