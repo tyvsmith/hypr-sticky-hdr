@@ -45,6 +45,19 @@ jobs:
         run: |
           archive="dist/hypr-sticky-hdr-$VERSION.tar.gz"
           checksum="$archive.sha256"
+          remote_refs=$(git ls-remote origin \
+            "refs/tags/$GITHUB_REF_NAME" \
+            "refs/tags/$GITHUB_REF_NAME^{}")
+          remote_commit=$(awk '$2 ~ /\^\{\}$/ { print $1 }' <<<"$remote_refs")
+          if [[ -z "$remote_commit" ]]; then
+            remote_commit=$(awk '$2 !~ /\^\{\}$/ { print $1 }' <<<"$remote_refs")
+          fi
+          checked_out_commit=$(git rev-parse HEAD)
+          if [[ "$remote_commit" != "$checked_out_commit" ]]; then
+            echo "remote tag does not resolve to checked-out commit" >&2
+            exit 1
+          fi
+
           if is_draft=$(gh release view "$GITHUB_REF_NAME" \
             --json isDraft --jq .isDraft 2>/dev/null); then
             if [[ "$is_draft" != true ]]; then
@@ -59,17 +72,4 @@ jobs:
               --verify-tag
           fi
           gh release upload "$GITHUB_REF_NAME" "$archive" "$checksum" --clobber
-
-          remote_refs=$(git ls-remote origin \
-            "refs/tags/$GITHUB_REF_NAME" \
-            "refs/tags/$GITHUB_REF_NAME^{}")
-          remote_commit=$(awk '$2 ~ /\^\{\}$/ { print $1 }' <<<"$remote_refs")
-          if [[ -z "$remote_commit" ]]; then
-            remote_commit=$(awk '$2 !~ /\^\{\}$/ { print $1 }' <<<"$remote_refs")
-          fi
-          checked_out_commit=$(git rev-parse HEAD)
-          if [[ "$remote_commit" != "$checked_out_commit" ]]; then
-            echo "remote tag does not resolve to checked-out commit" >&2
-            exit 1
-          fi
           gh release edit "$GITHUB_REF_NAME" --draft=false --latest

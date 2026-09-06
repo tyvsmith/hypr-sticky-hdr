@@ -72,6 +72,7 @@ dist: validate-dist-path
 	mkdir -p "$(DIST_STAGE)/tests"
 	cp --parents $(DIST_FILES) "$(DIST_STAGE)"
 	tar --sort=name --mtime="@$(SOURCE_DATE_EPOCH)" --owner=0 --group=0 --numeric-owner \
+		--mode='u=rwX,go=rX' \
 		-C "$(DIST_ROOT)" -czf "$(DIST_ARCHIVE)" "$(DIST_NAME)"
 	rm -rf -- "$(DIST_STAGE)"
 	cd "$(DIST_ROOT)" && sha256sum "$(DIST_NAME).tar.gz" > "$(DIST_NAME).tar.gz.sha256"
@@ -80,17 +81,18 @@ distcheck: dist
 	@tmp=$$(mktemp -d); trap 'rm -rf "$$tmp"' EXIT; \
 		cd "$(DIST_ROOT)"; sha256sum -c "$(DIST_NAME).tar.gz.sha256"; cd - >/dev/null; \
 		tar -xzf "$(DIST_ARCHIVE)" -C "$$tmp"; \
-		$(MAKE) -C "$$tmp/$(DIST_NAME)" check; \
-		$(MAKE) -C "$$tmp/$(DIST_NAME)" DESTDIR="$$tmp/pkg" prefix=/usr install; \
-		cmp sticky_hdr.lua "$$tmp/pkg/usr/share/lua/$(LUA_VERSION)/hypr/sticky_hdr.lua"; \
-		cmp README.md "$$tmp/pkg/usr/share/doc/$(PACKAGE)/README.md"; \
-		cmp LICENSE "$$tmp/pkg/usr/share/licenses/$(PACKAGE)/LICENSE"; \
+		src="$$tmp/$(DIST_NAME)"; \
+		$(MAKE) -C "$$src" check; \
+		$(MAKE) -C "$$src" DESTDIR="$$tmp/pkg" prefix=/usr install; \
+		cmp "$$src/sticky_hdr.lua" "$$tmp/pkg/usr/share/lua/$(LUA_VERSION)/hypr/sticky_hdr.lua"; \
+		cmp "$$src/README.md" "$$tmp/pkg/usr/share/doc/$(PACKAGE)/README.md"; \
+		cmp "$$src/LICENSE" "$$tmp/pkg/usr/share/licenses/$(PACKAGE)/LICENSE"; \
 		test "$$(find "$$tmp/pkg" -type f -printf '%P\n' | LC_ALL=C sort)" = \
 		"$$(printf '%s\n' \
 			'usr/share/doc/$(PACKAGE)/README.md' \
 			'usr/share/licenses/$(PACKAGE)/LICENSE' \
 			'usr/share/lua/$(LUA_VERSION)/hypr/sticky_hdr.lua')"; \
-		$(MAKE) -C "$$tmp/$(DIST_NAME)" DESTDIR="$$tmp/pkg" prefix=/usr uninstall; \
+		$(MAKE) -C "$$src" DESTDIR="$$tmp/pkg" prefix=/usr uninstall; \
 		test -z "$$(find "$$tmp/pkg" -type f -print -quit)"
 
 clean: validate-dist-root
